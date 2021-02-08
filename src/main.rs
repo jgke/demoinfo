@@ -1,9 +1,12 @@
 mod csgo;
 
 use byteorder::{ByteOrder, LittleEndian};
+use lazy_static::lazy_static;
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, Read};
+use std::sync::Mutex;
 use prost::Message;
 
 use crate::csgo::*;
@@ -20,58 +23,24 @@ trait BufReaderRaw {
 
 impl<R: Read> BufReaderRaw for R {
     fn read_u8(&mut self) -> Option<u8> {
-        let mut slice = [0u8];
-        self.read(&mut slice)
-            .map(|count| if count == 1 { Some(slice[0]) } else { None })
-            .ok()?
+        let mut slice = [0u8; 1];
+        self.read_exact(&mut slice).map(|_| slice[0]).ok()
     }
     fn read_u16(&mut self) -> Option<u16> {
-        let mut slice = [0u8, 0u8];
-        self.read(&mut slice)
-            .map(|count| {
-                if count == 2 {
-                    Some(LittleEndian::read_u16(&slice))
-                } else {
-                    None
-                }
-            })
-            .ok()?
+        let mut slice = [0u8; 2];
+        self.read_exact(&mut slice).map(|_| LittleEndian::read_u16(&slice)).ok()
     }
     fn read_u32(&mut self) -> Option<u32> {
-        let mut slice = [0u8, 0u8, 0u8, 0u8];
-        self.read(&mut slice)
-            .map(|count| {
-                if count == 4 {
-                    Some(LittleEndian::read_u32(&slice))
-                } else {
-                    None
-                }
-            })
-            .ok()?
+        let mut slice = [0u8; 4];
+        self.read_exact(&mut slice).map(|count| LittleEndian::read_u32(&slice)).ok()
     }
     fn read_i32(&mut self) -> Option<i32> {
-        let mut slice = [0u8, 0u8, 0u8, 0u8];
-        self.read(&mut slice)
-            .map(|count| {
-                if count == 4 {
-                    Some(LittleEndian::read_i32(&slice))
-                } else {
-                    None
-                }
-            })
-            .ok()?
+        let mut slice = [0u8; 4];
+        self.read_exact(&mut slice).map(|count| LittleEndian::read_i32(&slice)).ok()
     }
     fn read_f32(&mut self) -> Option<f32> {
-        let mut slice = [0u8, 0u8, 0u8, 0u8];
-        self.read(&mut slice)
-            .map(|count| {
-                if count == 4 {
-                    Some(LittleEndian::read_f32(&slice))
-                } else {
-                    None
-                }
-            })
-            .ok()?
+        let mut slice = [0u8; 4];
+        self.read_exact(&mut slice).map(|count| LittleEndian::read_f32(&slice)).ok()
     }
     fn read_var_u32(&mut self) -> Option<u32> {
         let mut res = 0;
@@ -86,7 +55,7 @@ impl<R: Read> BufReaderRaw for R {
     }
     fn read_u8_vec(&mut self, size: usize) -> Option<Vec<u8>> {
         let mut vec = vec![0; size];
-        self.read(&mut vec).map(|count| if count == size { Some(vec) } else { None }).ok()?
+        self.read_exact(&mut vec).map(|_| vec).ok()
     }
 }
 
@@ -250,50 +219,84 @@ struct Cmd {
     data: Vec<u8>,
 }
 
+lazy_static! {
+    static ref events: Mutex<HashMap<i32, (String, HashMap<i32, String>)>> = Mutex::new(HashMap::new());
+}
+
+
+
 impl Cmd {
     fn parse<R: Read>(r: &mut R) {
         loop {
             let cmd = r.read_var_u32();
             if cmd.is_none() {
-                dbg!(cmd);
                 break;
             }
             let size = r.read_var_u32().unwrap();
-            if cmd != Some(0) {
-                dbg!(cmd, size);
-            }
             let data = r.read_u8_vec(size as usize).unwrap();
 
             match cmd.unwrap() {
                 0 => { () }
-                1 => { dbg!(netmessages_public::CnetMsgDisconnect::decode(&*data)).unwrap(); () }
-                2 => { dbg!(netmessages_public::CnetMsgFile::decode(&*data)).unwrap(); () }
-                4 => { dbg!(netmessages_public::CnetMsgTick::decode(&*data)).unwrap(); () }
-                5 => { dbg!(netmessages_public::CnetMsgStringCmd::decode(&*data)).unwrap(); () }
-                6 => { dbg!(netmessages_public::CnetMsgSetConVar::decode(&*data)).unwrap(); () }
-                7 => { dbg!(netmessages_public::CnetMsgSignonState::decode(&*data)).unwrap(); () }
-                8 => { dbg!(netmessages_public::CsvcMsgServerInfo::decode(&*data)).unwrap(); () }
-                9 => { dbg!(netmessages_public::CsvcMsgSendTable::decode(&*data)).unwrap(); () }
-                10 => { dbg!(netmessages_public::CsvcMsgClassInfo::decode(&*data)).unwrap(); () }
-                11 => { dbg!(netmessages_public::CsvcMsgSetPause::decode(&*data)).unwrap(); () }
-                12 => { dbg!(netmessages_public::CsvcMsgCreateStringTable::decode(&*data)).unwrap(); () }
-                13 => { dbg!(netmessages_public::CsvcMsgUpdateStringTable::decode(&*data)).unwrap(); () }
-                14 => { dbg!(netmessages_public::CsvcMsgVoiceInit::decode(&*data)).unwrap(); () }
-                15 => { dbg!(netmessages_public::CsvcMsgVoiceData::decode(&*data)).unwrap(); () }
-                16 => { dbg!(netmessages_public::CsvcMsgPrint::decode(&*data)).unwrap(); () }
-                17 => { dbg!(netmessages_public::CsvcMsgSounds::decode(&*data)).unwrap(); () }
-                18 => { dbg!(netmessages_public::CsvcMsgSetView::decode(&*data)).unwrap(); () }
-                19 => { dbg!(netmessages_public::CsvcMsgFixAngle::decode(&*data)).unwrap(); () }
-                20 => { dbg!(netmessages_public::CsvcMsgCrosshairAngle::decode(&*data)).unwrap(); () }
-                21 => { dbg!(netmessages_public::CsvcMsgBspDecal::decode(&*data)).unwrap(); () }
-                23 => { dbg!(netmessages_public::CsvcMsgUserMessage::decode(&*data)).unwrap(); () }
-                25 => { dbg!(netmessages_public::CsvcMsgGameEvent::decode(&*data)).unwrap(); () }
-                26 => { dbg!(netmessages_public::CsvcMsgPacketEntities::decode(&*data)).unwrap(); () }
-                27 => { dbg!(netmessages_public::CsvcMsgTempEntities::decode(&*data)).unwrap(); () }
-                28 => { dbg!(netmessages_public::CsvcMsgPrefetch::decode(&*data)).unwrap(); () }
-                29 => { dbg!(netmessages_public::CsvcMsgMenu::decode(&*data)).unwrap(); () }
-                30 => { dbg!(netmessages_public::CsvcMsgGameEventList::decode(&*data)).unwrap(); () }
-                31 => { dbg!(netmessages_public::CsvcMsgGetCvarValue::decode(&*data)).unwrap(); () }
+                1 => { (netmessages_public::CnetMsgDisconnect::decode(&*data)).unwrap(); () }
+                2 => { (netmessages_public::CnetMsgFile::decode(&*data)).unwrap(); () }
+                4 => { (netmessages_public::CnetMsgTick::decode(&*data)).unwrap(); () }
+                5 => { (netmessages_public::CnetMsgStringCmd::decode(&*data)).unwrap(); () }
+                6 => { (netmessages_public::CnetMsgSetConVar::decode(&*data)).unwrap(); () }
+                7 => { (netmessages_public::CnetMsgSignonState::decode(&*data)).unwrap(); () }
+                8 => { (netmessages_public::CsvcMsgServerInfo::decode(&*data)).unwrap(); () }
+                9 => { (netmessages_public::CsvcMsgSendTable::decode(&*data)).unwrap(); () }
+                10 => { (netmessages_public::CsvcMsgClassInfo::decode(&*data)).unwrap(); () }
+                11 => { (netmessages_public::CsvcMsgSetPause::decode(&*data)).unwrap(); () }
+                12 => { (netmessages_public::CsvcMsgCreateStringTable::decode(&*data)).unwrap(); () }
+                13 => { (netmessages_public::CsvcMsgUpdateStringTable::decode(&*data)).unwrap(); () }
+                14 => { (netmessages_public::CsvcMsgVoiceInit::decode(&*data)).unwrap(); () }
+                15 => { (netmessages_public::CsvcMsgVoiceData::decode(&*data)).unwrap(); () }
+                16 => { (netmessages_public::CsvcMsgPrint::decode(&*data)).unwrap(); () }
+                17 => { (netmessages_public::CsvcMsgSounds::decode(&*data)).unwrap(); () }
+                18 => { (netmessages_public::CsvcMsgSetView::decode(&*data)).unwrap(); () }
+                19 => { (netmessages_public::CsvcMsgFixAngle::decode(&*data)).unwrap(); () }
+                20 => { (netmessages_public::CsvcMsgCrosshairAngle::decode(&*data)).unwrap(); () }
+                21 => { (netmessages_public::CsvcMsgBspDecal::decode(&*data)).unwrap(); () }
+                23 => { (netmessages_public::CsvcMsgUserMessage::decode(&*data)).unwrap(); () }
+                25 => {
+                    let ev = netmessages_public::CsvcMsgGameEvent::decode(&*data).unwrap();
+                    if let Some((name, key_data)) = ev.eventid.and_then(|id| events.lock().unwrap().get(&id).cloned()) {
+                        if name != "player_footstep" {
+                            println!("{}", name);
+                            for key in ev.keys {
+                                if let Some(id) = key.r#type {
+                                    println!("- {}", key_data[&id]);
+                                }
+                            }
+                        }
+                        //dbg!(name, ev);
+                    }
+                    ()
+                }
+                26 => { (netmessages_public::CsvcMsgPacketEntities::decode(&*data)).unwrap(); () }
+                27 => { (netmessages_public::CsvcMsgTempEntities::decode(&*data)).unwrap(); () }
+                28 => { (netmessages_public::CsvcMsgPrefetch::decode(&*data)).unwrap(); () }
+                29 => { (netmessages_public::CsvcMsgMenu::decode(&*data)).unwrap(); () }
+                30 => {
+                    let list = netmessages_public::CsvcMsgGameEventList::decode(&*data).unwrap();
+                    for event in list.descriptors {
+                        dbg!(&event);
+                        if let (Some(id), Some(name)) = (event.eventid, event.name) {
+                            let inner: HashMap<i32, String> = event.keys
+                                .into_iter()
+                                .map(|key| if let (Some(id), Some(name)) = (key.r#type, key.name) {
+                                    Some((id, name))
+                                } else {
+                                    None
+                                })
+                            .flatten()
+                            .collect();
+                            events.lock().unwrap().insert(id, (name, inner));
+                        }
+                    }
+                    ()
+                }
+                31 => { (netmessages_public::CsvcMsgGetCvarValue::decode(&*data)).unwrap(); () }
 
                 other => unimplemented!("{}", other)
             }
@@ -310,7 +313,6 @@ fn main() -> Result<(), std::io::Error> {
 
     loop {
         let header = PacketHeader::new(&mut reader);
-        dbg!(header);
         match header.cmd_type {
             CmdType::SyncTick => {
                 println!("SyncTick");
@@ -320,24 +322,23 @@ fn main() -> Result<(), std::io::Error> {
                 println!("Demo finished");
                 break;
             }
-            CmdType::SignOn => {
+            CmdType::SignOn | CmdType::Packet => {
                 let split1 = DemoCmdInfo::new(&mut reader);
                 let split2 = DemoCmdInfo::new(&mut reader);
-                dbg!(split1);
-                dbg!(split2);
 
                 reader.read_u32().unwrap();
                 reader.read_u32().unwrap();
 
                 let size: u32 = reader.read_u32().unwrap();
-                dbg!(size);
                 let slice = reader.read_u8_vec(size as usize).unwrap();
-                dbg!(Cmd::parse(&mut (*slice).as_ref()));
+                Cmd::parse(&mut (*slice).as_ref());
             }
-            CmdType::Packet => unimplemented!(),
             CmdType::ConsoleCmd => unimplemented!(),
             CmdType::UserCmd => unimplemented!(),
-            CmdType::DataTables => unimplemented!(),
+            CmdType::DataTables => {
+                let size: u32 = reader.read_u32().unwrap();
+                let slice = reader.read_u8_vec(size as usize).unwrap();
+            }
             CmdType::CustomData => unimplemented!(),
             CmdType::StringTables => unimplemented!(),
             //cmd => {
