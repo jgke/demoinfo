@@ -26,6 +26,7 @@ pub trait ReadExtras {
     fn read_var_u32(&mut self) -> io::Result<u32>;
     fn read_u8_vec(&mut self, size: usize) -> io::Result<Vec<u8>>;
     fn read_c_string(&mut self) -> io::Result<Vec<u8>>;
+    fn read_fixed_c_string(&mut self, size: usize) -> std::io::Result<String>;
 }
 
 macro_rules! read_le_fn {
@@ -86,6 +87,7 @@ impl<R: Read> ReadExtras for R {
         let mut vec = vec![0; size];
         self.read_exact(&mut vec).map(|_| vec)
     }
+
     fn read_c_string(&mut self) -> io::Result<Vec<u8>> {
         let mut result = Vec::new();
         loop {
@@ -96,6 +98,13 @@ impl<R: Read> ReadExtras for R {
             result.push(byte);
         }
         Ok(result)
+    }
+
+    fn read_fixed_c_string(&mut self, size: usize) -> std::io::Result<String> {
+        let buf = self.read_u8_vec(size)?;
+        let mut buf_slice: &[u8] = &buf;
+        let s = (&mut buf_slice).read_c_string()?;
+        Ok(String::from_utf8_lossy(&s).to_string())
     }
 }
 
@@ -182,6 +191,15 @@ impl<R: Read> BitReader<R> {
         Some(self.head.take()?.0)
     }
 }
+
+pub fn string_from_nilslice(s: &[u8]) -> String {
+    let data = s.iter()
+        .copied()
+        .take_while(|c| *c != 0)
+        .collect::<Vec<u8>>();
+    String::from_utf8_lossy(&data).to_string()
+}
+
 
 #[cfg(test)]
 mod test {

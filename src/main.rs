@@ -1,5 +1,7 @@
 mod bitreader;
 mod csgo;
+mod header;
+mod packet;
 
 use lazy_static::lazy_static;
 use prost::Message;
@@ -13,182 +15,134 @@ use std::sync::Mutex;
 use crate::bitreader::*;
 use crate::csgo::*;
 use crate::netmessages_public::csvc_msg_game_event::KeyT;
+use crate::header::Header;
+use crate::packet::{DemoCmdInfo, PacketHeader, CmdType};
 
-#[derive(Clone, Copy, Debug)]
-enum CmdType {
-    SignOn = 1,
-    Packet = 2,
-    SyncTick = 3,
-    ConsoleCmd = 4,
-    UserCmd = 5,
-    DataTables = 6,
-    Stop = 7,
-    CustomData = 8,
-    StringTables = 9,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PacketHeader {
-    cmd_type: CmdType,
-    tick: i32,
-    player_slot: u8,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DemoCmdInfo {
-    flags: i32,
-
-    view_origin: (f32, f32, f32),
-    view_angle: (f32, f32, f32),
-    local_view_angles: (f32, f32, f32),
-
-    view_origin2: (f32, f32, f32),
-    view_angle2: (f32, f32, f32),
-    local_view_angles2: (f32, f32, f32),
-}
-
-#[derive(Clone, Debug)]
-struct Header {
-    magic: String,
-    demo_protocol: i32,
-    network_protocol: i32,
-    server_name: String,
-    client_name: String,
-    map: String,
-    directory: String,
-    playback_time: f32,
-    playback_ticks: i32,
-    playback_frames: i32,
-    signon_length: i32,
-}
-
-#[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct PlayerInfo {
-    version: u64,
-    xuid: u64,
-    name: String,
-    user_id: i32,
-    guid: String,
-    friends_id: u32,
-    friends_name: String,
-    fake: bool,
-    proxy: bool,
-    custom_files_crc: [u32; 4],
-    files_downloaded: u8,
-    entity_id: i64,
+    pub version: u64,
+    pub xuid: u64,
+    pub name: String,
+    pub user_id: i32,
+    pub guid: String,
+    pub friends_id: u32,
+    pub friends_name: String,
+    pub fake: bool,
+    pub proxy: bool,
+    pub custom_files_crc: [u32; 4],
+    pub files_downloaded: u8,
+    pub entity_id: i64,
 }
 
-fn string_from_nilslice(s: &[u8]) -> String {
-    String::from_utf8(
-        s.iter()
-            .copied()
-            .take_while(|c| *c != 0)
-            .collect::<Vec<u8>>(),
-    )
-    .unwrap()
-}
+impl PlayerInfo {
+    fn new(entry_index: i64, buf: &[u8]) -> std::io::Result<PlayerInfo> {
+        let buf_ptr = &mut buf.as_ref();
+        let mut buf = BitReader::new(buf_ptr);
 
-impl Header {
-    fn new<R: Read>(reader: &mut R) -> Header {
-        let magic = string_from_nilslice(&reader.read_u8_vec(8).unwrap());
-        let demo_protocol = reader.read_i32().unwrap();
-        let network_protocol = reader.read_i32().unwrap();
-        let server_name = string_from_nilslice(&reader.read_u8_vec(260).unwrap());
-        let client_name = string_from_nilslice(&reader.read_u8_vec(260).unwrap());
-        let map = string_from_nilslice(&reader.read_u8_vec(260).unwrap());
-        let directory = string_from_nilslice(&reader.read_u8_vec(260).unwrap());
-        let playback_time = reader.read_f32().unwrap();
-        let playback_ticks = reader.read_i32().unwrap();
-        let playback_frames = reader.read_i32().unwrap();
-        let signon_length = reader.read_i32().unwrap();
-        let header = Header {
-            magic,
-            demo_protocol,
-            network_protocol,
-            server_name,
-            client_name,
-            map,
-            directory,
-            playback_time,
-            playback_ticks,
-            playback_frames,
-            signon_length,
-        };
+        let version = buf.read_u64_be()?;
+        let xuid = buf.read_u64_be()?;
+        let name = buf.read_fixed_c_string(128)?;
+        let user_id = buf.read_i32_be()?;
+        let guid = buf.read_fixed_c_string(32)?;
+        let friends_id = buf.read_u32_be()?;
+        let friends_name = buf.read_fixed_c_string(128)?;
+        let fake = buf.read_u8()?;
+        let proxy = buf.read_u8()?;
+        let custom_files_crc = [
+            buf.read_u32_be().unwrap(),
+            buf.read_u32_be().unwrap(),
+            buf.read_u32_be().unwrap(),
+            buf.read_u32_be().unwrap(),
+        ];
+        let files_downloaded = buf.read_u8().unwrap();
 
-        assert_eq!(header.magic, "HL2DEMO");
-        assert_eq!(header.demo_protocol, 4);
+        let entity_id = entry_index;
 
-        header
-    }
-}
-
-impl PacketHeader {
-    fn new<R: Read>(reader: &mut R) -> PacketHeader {
-        let cmd_type = reader.read_u8().unwrap();
-        let tick = reader.read_i32().unwrap();
-        let player_slot = reader.read_u8().unwrap();
-        PacketHeader {
-            cmd_type: match cmd_type {
-                1 => CmdType::SignOn,
-                2 => CmdType::Packet,
-                3 => CmdType::SyncTick,
-                4 => CmdType::ConsoleCmd,
-                5 => CmdType::UserCmd,
-                6 => CmdType::DataTables,
-                7 => CmdType::Stop,
-                8 => CmdType::CustomData,
-                9 => CmdType::StringTables,
-                other => panic!("Unexpected command type: {}", other),
-            },
-            tick,
-            player_slot,
-        }
-    }
-}
-
-impl DemoCmdInfo {
-    fn new<R: Read>(r: &mut R) -> DemoCmdInfo {
-        DemoCmdInfo {
-            flags: r.read_i32().unwrap(),
-            view_origin: (
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-            ),
-            view_angle: (
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-            ),
-            local_view_angles: (
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-            ),
-            view_origin2: (
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-            ),
-            view_angle2: (
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-            ),
-            local_view_angles2: (
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-                r.read_f32().unwrap(),
-            ),
-        }
+        Ok(PlayerInfo {
+            version,
+            xuid,
+            name,
+            user_id,
+            guid,
+            friends_id,
+            friends_name,
+            fake: fake != 0,
+            proxy: proxy != 0,
+            custom_files_crc,
+            files_downloaded,
+            entity_id,
+        })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cmd {
-    cmd: u32,
-    data: Vec<u8>,
+    pub cmd: u32,
+    pub data: Vec<u8>,
 }
+
+impl Cmd {
+    fn parse<R: Read>(r: &mut R) {
+        loop {
+            let cmd = r.read_var_u32();
+            if cmd.is_err() {
+                break;
+            }
+            let size = r.read_var_u32().unwrap();
+            let data = r.read_u8_vec(size as usize).unwrap();
+
+            match cmd.unwrap() {
+                // 0 => { () }
+                // 1 => { (netmessages_public::CnetMsgDisconnect::decode(&*data)).unwrap(); () }
+                // 2 => { (netmessages_public::CnetMsgFile::decode(&*data)).unwrap(); () }
+                // 4 => { (netmessages_public::CnetMsgTick::decode(&*data)).unwrap(); () }
+                // 5 => { (netmessages_public::CnetMsgStringCmd::decode(&*data)).unwrap(); () }
+                // 6 => { (netmessages_public::CnetMsgSetConVar::decode(&*data)).unwrap(); () }
+                // 7 => { (netmessages_public::CnetMsgSignonState::decode(&*data)).unwrap(); () }
+                // 8 => { (netmessages_public::CsvcMsgServerInfo::decode(&*data)).unwrap(); () }
+                // 9 => { (netmessages_public::CsvcMsgSendTable::decode(&*data)).unwrap(); () }
+                // 10 => { (netmessages_public::CsvcMsgClassInfo::decode(&*data)).unwrap(); () }
+                // 11 => { (netmessages_public::CsvcMsgSetPause::decode(&*data)).unwrap(); () }
+                12 => {
+                    let ev = netmessages_public::CsvcMsgCreateStringTable::decode(&*data).unwrap();
+                    create_string_table(ev).unwrap();
+                }
+
+                // 13 => { (netmessages_public::CsvcMsgUpdateStringTable::decode(&*data)).unwrap(); () }
+                // 14 => { (netmessages_public::CsvcMsgVoiceInit::decode(&*data)).unwrap(); () }
+                // 15 => { (netmessages_public::CsvcMsgVoiceData::decode(&*data)).unwrap(); () }
+                // 16 => { (netmessages_public::CsvcMsgPrint::decode(&*data)).unwrap(); () }
+                // 17 => { (netmessages_public::CsvcMsgSounds::decode(&*data)).unwrap(); () }
+                // 18 => { (netmessages_public::CsvcMsgSetView::decode(&*data)).unwrap(); () }
+                // 19 => { (netmessages_public::CsvcMsgFixAngle::decode(&*data)).unwrap(); () }
+                // 20 => { (netmessages_public::CsvcMsgCrosshairAngle::decode(&*data)).unwrap(); () }
+                // 21 => { (netmessages_public::CsvcMsgBspDecal::decode(&*data)).unwrap(); () }
+                23 => {
+                    let msg = netmessages_public::CsvcMsgUserMessage::decode(&*data).unwrap();
+                    handle_user_message(msg);
+                }
+                25 => {
+                    let ev = netmessages_public::CsvcMsgGameEvent::decode(&*data).unwrap();
+                    handle_game_event(ev);
+                }
+
+                // 26 => { (netmessages_public::CsvcMsgPacketEntities::decode(&*data)).unwrap(); () }
+                // 27 => { (netmessages_public::CsvcMsgTempEntities::decode(&*data)).unwrap(); () }
+                // 28 => { (netmessages_public::CsvcMsgPrefetch::decode(&*data)).unwrap(); () }
+                // 29 => { (netmessages_public::CsvcMsgMenu::decode(&*data)).unwrap(); () }
+
+                30 => {
+                    let list = netmessages_public::CsvcMsgGameEventList::decode(&*data).unwrap();
+                    read_event_names(list);
+                }
+
+                // 31 => { (netmessages_public::CsvcMsgGetCvarValue::decode(&*data)).unwrap(); () }
+                _other => {} // other => unimplemented!("{}", other)
+            }
+        }
+    }
+}
+
 
 lazy_static! {
     static ref EVENTS: Mutex<HashMap<i32, (String, HashMap<usize, String>)>> =
@@ -240,61 +194,127 @@ fn show_key(k: &KeyT) -> String {
     }
 }
 
-fn read_fixed_c_string<R: Read>(mut r: R, size: usize) -> std::io::Result<String> {
-    let buf = r.read_u8_vec(size)?;
-    let mut buf_slice: &[u8] = &buf;
-    let s = (&mut buf_slice).read_c_string()?;
-    Ok(String::from_utf8_lossy(&s).to_string())
+fn handle_user_message(msg: netmessages_public::CsvcMsgUserMessage) {
+    let data: &[u8] = &msg.msg_data.unwrap();
+    let cmd = msg.msg_type.unwrap();
+
+    match cmd {
+        6 => {
+            let msg = cstrike15_usermessages_public::CcsUsrMsgSayText2::decode(data).unwrap();
+            dbg!(msg);
+        }
+        _ => {}
+    }
 }
 
-impl PlayerInfo {
-    fn new(entry_index: i64, buf: &[u8]) -> std::io::Result<PlayerInfo> {
-        let buf_ptr = &mut buf.as_ref();
-        let mut buf = BitReader::new(buf_ptr);
+fn handle_game_event(ev: netmessages_public::CsvcMsgGameEvent) {
+    let ignored = [
+        "player_footstep",
+        "weapon_fire",
+        "weapon_reload",
+        "player_hurt",
+        "item_pickup",
+    ];
+    if let Some((name, key_data)) = ev.eventid.and_then(|id| EVENTS.lock().unwrap().get(&id).cloned()) {
+        if ignored.contains(&name.as_str()) {
+            return;
+        }
+        if name == "item_equip" {
+            let mut item = None;
+            let mut userid = None;
+            for (i, key) in ev.keys.iter().enumerate() {
+                let key_name = &key_data[&i];
+                if key_name == "item" {
+                    item = Some(show_key(&key));
+                } else if key_name == "userid" {
+                    userid = key.val_short;
+                }
+                //println!("- {} = {}", key_name, show_key(&key));
+            }
+            if let (Some(item), Some(userid)) = (item, userid) {
+                equip(userid, item);
+            }
+        } else if name == "player_death" {
+            let mut userid = None;
+            for (i, key) in ev.keys.iter().enumerate() {
+                let key_name = &key_data[&i];
+                //println!("- {} = {}", key_name, show_key(&key));
+                if key_name == "userid" {
+                    userid = key.val_short;
+                }
+            }
+            if let Some(id) = userid {
+                if let Some(muna) = muna_in_hand(id) {
+                    println!(
+                        "{}, (muna in hand = {})",
+                        PLAYERS.lock().unwrap()[&id],
+                        muna
+                        );
+                }
+            }
+        } else if name == "player_info"
+            || name == "player_connect"
+                || name == "player_connect_full"
+                {
+                    for (i, key) in ev.keys.iter().enumerate() {
+                        let key_name = &key_data[&i];
+                        //if key_name == "item" {
+                        //    item = Some(show_key(&key));
+                        //} else if key_name == "userid" {
+                        //    userid = key.val_short;
+                        //}
+                        println!("- {} = {}", key_name, show_key(&key));
+                    }
+                } else {
+                    dbg!(&name);
+                    /*
+                       for (i, key) in ev.keys.iter().enumerate() {
+                       let key_name = &key_data[&i];
+                       if key_name == "item" {
+                       item = Some(show_key(&key));
+                       } else if key_name == "userid" {
+                       userid = key.val_short;
+                       }
+                       println!("- {} = {}", key_name, show_key(&key));
+                       }
+                       */
+                }
+    } else if let Some(name) = ev.event_name {
+        println!("{}", name);
+        for key in ev.keys {
+            println!("- {:?} = {}", key, show_key(&key));
+        }
+    } else {
+        dbg!(&ev);
+    }
+}
 
-        let version = buf.read_u64_be()?;
-        let xuid = buf.read_u64_be()?;
-
-        let name = read_fixed_c_string(&mut buf, 128)?;
-
-        let user_id = buf.read_i32_be()?;
-        let guid = read_fixed_c_string(&mut buf, 32)?;
-        let friends_id = buf.read_u32_be()?;
-
-        let friends_name = read_fixed_c_string(&mut buf, 128)?;
-
-        let fake = buf.read_u8()?;
-        let proxy = buf.read_u8()?;
-
-        let custom_files_crc = [
-            buf.read_u32_be().unwrap(),
-            buf.read_u32_be().unwrap(),
-            buf.read_u32_be().unwrap(),
-            buf.read_u32_be().unwrap(),
-        ];
-
-        let files_downloaded = buf.read_u8().unwrap();
-        let entity_id = entry_index;
-
-        Ok(PlayerInfo {
-            version,
-            xuid,
-            name,
-            user_id,
-            guid,
-            friends_id,
-            friends_name,
-            fake: fake != 0,
-            proxy: proxy != 0,
-            custom_files_crc,
-            files_downloaded,
-            entity_id,
-        })
+fn read_event_names(list: netmessages_public::CsvcMsgGameEventList) {
+    for event in list.descriptors {
+        if let (Some(id), Some(name)) = (event.eventid, event.name) {
+            let inner: HashMap<usize, String> = event
+                .keys
+                .into_iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    if let Some(name) = key.name {
+                        Some((i, name))
+                    } else {
+                        None
+                    }
+                })
+            .flatten()
+                .collect();
+            EVENTS.lock().unwrap().insert(id, (name, inner));
+        }
     }
 }
 
 fn create_string_table(msg: netmessages_public::CsvcMsgCreateStringTable) -> std::io::Result<()> {
     let name = msg.name.unwrap();
+    if name != "userinfo" {
+        return Ok(())
+    }
     let max_entries = msg.max_entries.unwrap();
     let num_entries = msg.num_entries.unwrap();
     let user_data_fixed_size = msg.user_data_fixed_size.filter(|n| *n).is_some();
@@ -413,151 +433,6 @@ fn create_string_table(msg: netmessages_public::CsvcMsgCreateStringTable) -> std
     Ok(())
 }
 
-impl Cmd {
-    fn parse<R: Read>(r: &mut R) {
-        loop {
-            let cmd = r.read_var_u32();
-            if cmd.is_err() {
-                break;
-            }
-            let size = r.read_var_u32().unwrap();
-            let data = r.read_u8_vec(size as usize).unwrap();
-
-            match cmd.unwrap() {
-                // 0 => { () }
-                // 1 => { (netmessages_public::CnetMsgDisconnect::decode(&*data)).unwrap(); () }
-                // 2 => { (netmessages_public::CnetMsgFile::decode(&*data)).unwrap(); () }
-                // 4 => { (netmessages_public::CnetMsgTick::decode(&*data)).unwrap(); () }
-                // 5 => { (netmessages_public::CnetMsgStringCmd::decode(&*data)).unwrap(); () }
-                // 6 => { (netmessages_public::CnetMsgSetConVar::decode(&*data)).unwrap(); () }
-                // 7 => { (netmessages_public::CnetMsgSignonState::decode(&*data)).unwrap(); () }
-                // 8 => { (netmessages_public::CsvcMsgServerInfo::decode(&*data)).unwrap(); () }
-                // 9 => { (netmessages_public::CsvcMsgSendTable::decode(&*data)).unwrap(); () }
-                // 10 => { (netmessages_public::CsvcMsgClassInfo::decode(&*data)).unwrap(); () }
-                // 11 => { (netmessages_public::CsvcMsgSetPause::decode(&*data)).unwrap(); () }
-                12 => {
-                    let ev = netmessages_public::CsvcMsgCreateStringTable::decode(&*data).unwrap();
-                    create_string_table(ev).unwrap();
-                }
-
-                // 13 => { (netmessages_public::CsvcMsgUpdateStringTable::decode(&*data)).unwrap(); () }
-                // 14 => { (netmessages_public::CsvcMsgVoiceInit::decode(&*data)).unwrap(); () }
-                // 15 => { (netmessages_public::CsvcMsgVoiceData::decode(&*data)).unwrap(); () }
-                // 16 => { (netmessages_public::CsvcMsgPrint::decode(&*data)).unwrap(); () }
-                // 17 => { (netmessages_public::CsvcMsgSounds::decode(&*data)).unwrap(); () }
-                // 18 => { (netmessages_public::CsvcMsgSetView::decode(&*data)).unwrap(); () }
-                // 19 => { (netmessages_public::CsvcMsgFixAngle::decode(&*data)).unwrap(); () }
-                // 20 => { (netmessages_public::CsvcMsgCrosshairAngle::decode(&*data)).unwrap(); () }
-                // 21 => { (netmessages_public::CsvcMsgBspDecal::decode(&*data)).unwrap(); () }
-                // 23 => { (netmessages_public::CsvcMsgUserMessage::decode(&*data)).unwrap(); () }
-                25 => {
-                    let ev = netmessages_public::CsvcMsgGameEvent::decode(&*data).unwrap();
-                    if let Some((name, key_data)) = ev
-                        .eventid
-                        .and_then(|id| EVENTS.lock().unwrap().get(&id).cloned())
-                    {
-                        if name == "item_equip" {
-                            let mut item = None;
-                            let mut userid = None;
-                            for (i, key) in ev.keys.iter().enumerate() {
-                                let key_name = &key_data[&i];
-                                if key_name == "item" {
-                                    item = Some(show_key(&key));
-                                } else if key_name == "userid" {
-                                    userid = key.val_short;
-                                }
-                                //println!("- {} = {}", key_name, show_key(&key));
-                            }
-                            if let (Some(item), Some(userid)) = (item, userid) {
-                                equip(userid, item);
-                            }
-                        } else if name == "player_death" {
-                            let mut userid = None;
-                            for (i, key) in ev.keys.iter().enumerate() {
-                                let key_name = &key_data[&i];
-                                //println!("- {} = {}", key_name, show_key(&key));
-                                if key_name == "userid" {
-                                    userid = key.val_short;
-                                }
-                            }
-                            if let Some(id) = userid {
-                                if let Some(muna) = muna_in_hand(id) {
-                                    println!(
-                                        "{}, (muna in hand = {})",
-                                        PLAYERS.lock().unwrap()[&id],
-                                        muna
-                                    );
-                                }
-                            }
-                        } else if name == "player_info"
-                            || name == "player_connect"
-                            || name == "player_connect_full"
-                        {
-                            for (i, key) in ev.keys.iter().enumerate() {
-                                let key_name = &key_data[&i];
-                                //if key_name == "item" {
-                                //    item = Some(show_key(&key));
-                                //} else if key_name == "userid" {
-                                //    userid = key.val_short;
-                                //}
-                                println!("- {} = {}", key_name, show_key(&key));
-                            }
-                        } else {
-                            /*
-                            for (i, key) in ev.keys.iter().enumerate() {
-                                let key_name = &key_data[&i];
-                                if key_name == "item" {
-                                    item = Some(show_key(&key));
-                                } else if key_name == "userid" {
-                                    userid = key.val_short;
-                                }
-                                println!("- {} = {}", key_name, show_key(&key));
-                            }
-                            */
-                        }
-                    } else if let Some(name) = ev.event_name {
-                        println!("{}", name);
-                        for key in ev.keys {
-                            println!("- {:?} = {}", key, show_key(&key));
-                        }
-                    } else {
-                        dbg!(&ev);
-                    }
-                }
-
-                // 26 => { (netmessages_public::CsvcMsgPacketEntities::decode(&*data)).unwrap(); () }
-                // 27 => { (netmessages_public::CsvcMsgTempEntities::decode(&*data)).unwrap(); () }
-                // 28 => { (netmessages_public::CsvcMsgPrefetch::decode(&*data)).unwrap(); () }
-                // 29 => { (netmessages_public::CsvcMsgMenu::decode(&*data)).unwrap(); () }
-                30 => {
-                    let list = netmessages_public::CsvcMsgGameEventList::decode(&*data).unwrap();
-                    for event in list.descriptors {
-                        if let (Some(id), Some(name)) = (event.eventid, event.name) {
-                            let inner: HashMap<usize, String> = event
-                                .keys
-                                .into_iter()
-                                .enumerate()
-                                .map(|(i, key)| {
-                                    if let Some(name) = key.name {
-                                        Some((i, name))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .flatten()
-                                .collect();
-                            EVENTS.lock().unwrap().insert(id, (name, inner));
-                        }
-                    }
-                }
-
-                // 31 => { (netmessages_public::CsvcMsgGetCvarValue::decode(&*data)).unwrap(); () }
-                _other => {} // other => unimplemented!("{}", other)
-            }
-        }
-    }
-}
-
 fn main() -> Result<(), std::io::Error> {
     let args: Vec<String> = env::args().collect();
     let file = File::open(&args[1])?;
@@ -629,10 +504,10 @@ mod test {
 
     #[test]
     fn read_var() {
-        assert_eq!(None, (&mut (&[]).as_ref()).read_var_u32());
-        assert_eq!(Some(1), (&mut (&[1]).as_ref()).read_var_u32());
-        assert_eq!(None, (&mut (&[255]).as_ref()).read_var_u32());
-        assert_eq!(Some(4), (&mut (&[4]).as_ref()).read_var_u32());
-        assert_eq!(Some(2226), (&mut (&[178, 17]).as_ref()).read_var_u32());
+        assert_eq!(None, (&mut (&[]).as_ref()).read_var_u32().ok());
+        assert_eq!(Some(1), (&mut (&[1]).as_ref()).read_var_u32().ok());
+        assert_eq!(None, (&mut (&[255]).as_ref()).read_var_u32().ok());
+        assert_eq!(Some(4), (&mut (&[4]).as_ref()).read_var_u32().ok());
+        assert_eq!(Some(2226), (&mut (&[178, 17]).as_ref()).read_var_u32().ok());
     }
 }
