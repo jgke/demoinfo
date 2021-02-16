@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use crate::bitreader::{ReadExtras, string_from_nilslice};
+use crate::bitreader::{string_from_nilslice, ReadExtras};
 
 #[derive(Clone, Debug)]
 pub struct Header {

@@ -1,185 +1,72 @@
 mod bitreader;
+mod cmd;
 mod csgo;
 mod header;
 mod packet;
+mod playerinfo;
+mod stringtables;
 
-use lazy_static::lazy_static;
 use prost::Message;
-use std::collections::{HashMap, VecDeque};
-use std::convert::TryInto;
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::{BufReader, Read};
-use std::sync::Mutex;
+use std::io::BufReader;
 
 use crate::bitreader::*;
+use crate::cmd::Cmd;
 use crate::csgo::*;
-use crate::netmessages_public::csvc_msg_game_event::KeyT;
 use crate::header::Header;
-use crate::packet::{DemoCmdInfo, PacketHeader, CmdType};
+use crate::netmessages_public::csvc_msg_game_event::KeyT;
+use crate::packet::{CmdType, DemoCmdInfo, PacketHeader};
+use crate::playerinfo::PlayerInfo;
+use crate::stringtables::create_string_table;
 
-#[allow(dead_code)]
-struct PlayerInfo {
-    pub version: u64,
-    pub xuid: u64,
-    pub name: String,
-    pub user_id: i32,
-    pub guid: String,
-    pub friends_id: u32,
-    pub friends_name: String,
-    pub fake: bool,
-    pub proxy: bool,
-    pub custom_files_crc: [u32; 4],
-    pub files_downloaded: u8,
-    pub entity_id: i64,
+#[derive(Clone, Debug)]
+struct Player {
+    name: String,
+
+    kills: i32,
+    assists: i32,
+    flash_assists: i32,
+    deaths: i32,
+
+    equipped: String,
+
+    info: PlayerInfo,
 }
 
-impl PlayerInfo {
-    fn new(entry_index: i64, buf: &[u8]) -> std::io::Result<PlayerInfo> {
-        let buf_ptr = &mut buf.as_ref();
-        let mut buf = BitReader::new(buf_ptr);
-
-        let version = buf.read_u64_be()?;
-        let xuid = buf.read_u64_be()?;
-        let name = buf.read_fixed_c_string(128)?;
-        let user_id = buf.read_i32_be()?;
-        let guid = buf.read_fixed_c_string(32)?;
-        let friends_id = buf.read_u32_be()?;
-        let friends_name = buf.read_fixed_c_string(128)?;
-        let fake = buf.read_u8()?;
-        let proxy = buf.read_u8()?;
-        let custom_files_crc = [
-            buf.read_u32_be().unwrap(),
-            buf.read_u32_be().unwrap(),
-            buf.read_u32_be().unwrap(),
-            buf.read_u32_be().unwrap(),
-        ];
-        let files_downloaded = buf.read_u8().unwrap();
-
-        let entity_id = entry_index;
-
-        Ok(PlayerInfo {
-            version,
-            xuid,
-            name,
-            user_id,
-            guid,
-            friends_id,
-            friends_name,
-            fake: fake != 0,
-            proxy: proxy != 0,
-            custom_files_crc,
-            files_downloaded,
-            entity_id,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Cmd {
-    pub cmd: u32,
-    pub data: Vec<u8>,
-}
-
-impl Cmd {
-    fn parse<R: Read>(r: &mut R) {
-        loop {
-            let cmd = r.read_var_u32();
-            if cmd.is_err() {
-                break;
-            }
-            let size = r.read_var_u32().unwrap();
-            let data = r.read_u8_vec(size as usize).unwrap();
-
-            match cmd.unwrap() {
-                // 0 => { () }
-                // 1 => { (netmessages_public::CnetMsgDisconnect::decode(&*data)).unwrap(); () }
-                // 2 => { (netmessages_public::CnetMsgFile::decode(&*data)).unwrap(); () }
-                // 4 => { (netmessages_public::CnetMsgTick::decode(&*data)).unwrap(); () }
-                // 5 => { (netmessages_public::CnetMsgStringCmd::decode(&*data)).unwrap(); () }
-                // 6 => { (netmessages_public::CnetMsgSetConVar::decode(&*data)).unwrap(); () }
-                // 7 => { (netmessages_public::CnetMsgSignonState::decode(&*data)).unwrap(); () }
-                // 8 => { (netmessages_public::CsvcMsgServerInfo::decode(&*data)).unwrap(); () }
-                // 9 => { (netmessages_public::CsvcMsgSendTable::decode(&*data)).unwrap(); () }
-                // 10 => { (netmessages_public::CsvcMsgClassInfo::decode(&*data)).unwrap(); () }
-                // 11 => { (netmessages_public::CsvcMsgSetPause::decode(&*data)).unwrap(); () }
-                12 => {
-                    let ev = netmessages_public::CsvcMsgCreateStringTable::decode(&*data).unwrap();
-                    create_string_table(ev).unwrap();
-                }
-
-                // 13 => { (netmessages_public::CsvcMsgUpdateStringTable::decode(&*data)).unwrap(); () }
-                // 14 => { (netmessages_public::CsvcMsgVoiceInit::decode(&*data)).unwrap(); () }
-                // 15 => { (netmessages_public::CsvcMsgVoiceData::decode(&*data)).unwrap(); () }
-                // 16 => { (netmessages_public::CsvcMsgPrint::decode(&*data)).unwrap(); () }
-                // 17 => { (netmessages_public::CsvcMsgSounds::decode(&*data)).unwrap(); () }
-                // 18 => { (netmessages_public::CsvcMsgSetView::decode(&*data)).unwrap(); () }
-                // 19 => { (netmessages_public::CsvcMsgFixAngle::decode(&*data)).unwrap(); () }
-                // 20 => { (netmessages_public::CsvcMsgCrosshairAngle::decode(&*data)).unwrap(); () }
-                // 21 => { (netmessages_public::CsvcMsgBspDecal::decode(&*data)).unwrap(); () }
-                23 => {
-                    let msg = netmessages_public::CsvcMsgUserMessage::decode(&*data).unwrap();
-                    handle_user_message(msg);
-                }
-                25 => {
-                    let ev = netmessages_public::CsvcMsgGameEvent::decode(&*data).unwrap();
-                    handle_game_event(ev);
-                }
-
-                // 26 => { (netmessages_public::CsvcMsgPacketEntities::decode(&*data)).unwrap(); () }
-                // 27 => { (netmessages_public::CsvcMsgTempEntities::decode(&*data)).unwrap(); () }
-                // 28 => { (netmessages_public::CsvcMsgPrefetch::decode(&*data)).unwrap(); () }
-                // 29 => { (netmessages_public::CsvcMsgMenu::decode(&*data)).unwrap(); () }
-
-                30 => {
-                    let list = netmessages_public::CsvcMsgGameEventList::decode(&*data).unwrap();
-                    read_event_names(list);
-                }
-
-                // 31 => { (netmessages_public::CsvcMsgGetCvarValue::decode(&*data)).unwrap(); () }
-                _other => {} // other => unimplemented!("{}", other)
-            }
+impl Player {
+    pub fn new(info: PlayerInfo) -> Player {
+        Player {
+            name: info.name.clone(),
+            kills: 0,
+            assists: 0,
+            flash_assists: 0,
+            deaths: 0,
+            equipped: "knife".to_string(),
+            info,
         }
     }
 }
 
-
-lazy_static! {
-    static ref EVENTS: Mutex<HashMap<i32, (String, HashMap<usize, String>)>> =
-        Mutex::new(HashMap::new());
-    static ref NAMES: Mutex<HashMap<i32, String>> = Mutex::new(HashMap::new());
-    static ref EQUIPS: Mutex<HashMap<i32, String>> = Mutex::new(HashMap::new());
-    static ref PLAYERS: Mutex<HashMap<i32, String>> = Mutex::new(HashMap::new());
-}
-
-fn equip(id: i32, item: String) {
-    EQUIPS.lock().unwrap().insert(id, item);
-}
-
-fn muna_in_hand(id: i32) -> Option<String> {
-    let equips = EQUIPS.lock().unwrap();
-    let item = equips.get(&id)?;
-    let munas = [
-        "hegrenade",
-        "incgrenade",
-        "smokegrenade",
-        "flashbang",
-        "molotov",
-    ];
-    Some(item).filter(|i| munas.contains(&i.as_ref())).cloned()
+#[derive(Clone, Debug)]
+struct State {
+    events: HashMap<i32, (String, HashMap<usize, String>)>,
+    players: HashMap<i32, Player>,
+    teams: HashMap<i32, bool>,
 }
 
 #[rustfmt::skip]
 fn show_key(k: &KeyT) -> String {
     match k {
-        KeyT { val_string: Some(s), .. } => s.clone(),
-        KeyT { val_float: Some(n), .. } => n.to_string(),
-        KeyT { val_long: Some(n), .. } => n.to_string(),
-        KeyT { val_short: Some(n), .. } => n.to_string(),
-        KeyT { val_byte: Some(n), .. } => n.to_string(),
-        KeyT { val_bool: Some(n), .. } => n.to_string(),
-        KeyT { val_uint64: Some(n), .. } => n.to_string(),
-        KeyT { val_wstring: Some(n), .. } => String::from_utf8_lossy(&n).to_string(),
+        KeyT { val_string: Some(s), .. } => format!("[string] {}", s),
+        KeyT { val_float: Some(n), .. } => format!("[float] {}", n),
+        KeyT { val_long: Some(n), .. } => format!("[long] {}", n),
+        KeyT { val_short: Some(n), .. } => format!("[short] {}", n),
+        KeyT { val_byte: Some(n), .. } => format!("[byte] {}", n),
+        KeyT { val_bool: Some(n), .. } => format!("[bool] {}", n),
+        KeyT { val_uint64: Some(n), .. } => format!("[u64] {}", n),
+        KeyT { val_wstring: Some(n), .. } => format!("[wstring] {}", String::from_utf8_lossy(&n).to_string()),
         KeyT {
             val_string: None,
             val_float: None,
@@ -198,98 +85,18 @@ fn handle_user_message(msg: netmessages_public::CsvcMsgUserMessage) {
     let data: &[u8] = &msg.msg_data.unwrap();
     let cmd = msg.msg_type.unwrap();
 
-    match cmd {
-        6 => {
-            let msg = cstrike15_usermessages_public::CcsUsrMsgSayText2::decode(data).unwrap();
-            dbg!(msg);
-        }
-        _ => {}
+    // See: protos/cstrike15_usermessages_public.proto::ECstrike15UserMessages
+    if cmd == 6 {
+        let _msg = cstrike15_usermessages_public::CcsUsrMsgSayText2::decode(data).unwrap();
+        //dbg!(msg);
     }
 }
 
-fn handle_game_event(ev: netmessages_public::CsvcMsgGameEvent) {
-    let ignored = [
-        "player_footstep",
-        "weapon_fire",
-        "weapon_reload",
-        "player_hurt",
-        "item_pickup",
-    ];
-    if let Some((name, key_data)) = ev.eventid.and_then(|id| EVENTS.lock().unwrap().get(&id).cloned()) {
-        if ignored.contains(&name.as_str()) {
-            return;
-        }
-        if name == "item_equip" {
-            let mut item = None;
-            let mut userid = None;
-            for (i, key) in ev.keys.iter().enumerate() {
-                let key_name = &key_data[&i];
-                if key_name == "item" {
-                    item = Some(show_key(&key));
-                } else if key_name == "userid" {
-                    userid = key.val_short;
-                }
-                //println!("- {} = {}", key_name, show_key(&key));
-            }
-            if let (Some(item), Some(userid)) = (item, userid) {
-                equip(userid, item);
-            }
-        } else if name == "player_death" {
-            let mut userid = None;
-            for (i, key) in ev.keys.iter().enumerate() {
-                let key_name = &key_data[&i];
-                //println!("- {} = {}", key_name, show_key(&key));
-                if key_name == "userid" {
-                    userid = key.val_short;
-                }
-            }
-            if let Some(id) = userid {
-                if let Some(muna) = muna_in_hand(id) {
-                    println!(
-                        "{}, (muna in hand = {})",
-                        PLAYERS.lock().unwrap()[&id],
-                        muna
-                        );
-                }
-            }
-        } else if name == "player_info"
-            || name == "player_connect"
-                || name == "player_connect_full"
-                {
-                    for (i, key) in ev.keys.iter().enumerate() {
-                        let key_name = &key_data[&i];
-                        //if key_name == "item" {
-                        //    item = Some(show_key(&key));
-                        //} else if key_name == "userid" {
-                        //    userid = key.val_short;
-                        //}
-                        println!("- {} = {}", key_name, show_key(&key));
-                    }
-                } else {
-                    dbg!(&name);
-                    /*
-                       for (i, key) in ev.keys.iter().enumerate() {
-                       let key_name = &key_data[&i];
-                       if key_name == "item" {
-                       item = Some(show_key(&key));
-                       } else if key_name == "userid" {
-                       userid = key.val_short;
-                       }
-                       println!("- {} = {}", key_name, show_key(&key));
-                       }
-                       */
-                }
-    } else if let Some(name) = ev.event_name {
-        println!("{}", name);
-        for key in ev.keys {
-            println!("- {:?} = {}", key, show_key(&key));
-        }
-    } else {
-        dbg!(&ev);
-    }
-}
+fn read_event_names(
+    list: netmessages_public::CsvcMsgGameEventList,
+) -> HashMap<i32, (String, HashMap<usize, String>)> {
+    let mut result = HashMap::new();
 
-fn read_event_names(list: netmessages_public::CsvcMsgGameEventList) {
     for event in list.descriptors {
         if let (Some(id), Some(name)) = (event.eventid, event.name) {
             let inner: HashMap<usize, String> = event
@@ -303,134 +110,247 @@ fn read_event_names(list: netmessages_public::CsvcMsgGameEventList) {
                         None
                     }
                 })
-            .flatten()
+                .flatten()
                 .collect();
-            EVENTS.lock().unwrap().insert(id, (name, inner));
+            result.insert(id, (name, inner));
         }
     }
+
+    result
 }
 
-fn create_string_table(msg: netmessages_public::CsvcMsgCreateStringTable) -> std::io::Result<()> {
-    let name = msg.name.unwrap();
-    if name != "userinfo" {
-        return Ok(())
-    }
-    let max_entries = msg.max_entries.unwrap();
-    let num_entries = msg.num_entries.unwrap();
-    let user_data_fixed_size = msg.user_data_fixed_size.filter(|n| *n).is_some();
-    let user_data_size = msg.user_data_size.filter(|n| *n != 0);
-    let user_data_size_bits = msg.user_data_size_bits.filter(|n| *n != 0);
-
-    if user_data_fixed_size {
-        assert!(user_data_size.is_some());
-        assert!(user_data_size_bits.is_some());
-    }
-
-    let _flags = msg.flags.unwrap();
-    let string_data: &[u8] = &msg.string_data.unwrap();
-    let reader_buf = &mut string_data.as_ref();
-    let mut reader = BitReader::new(reader_buf);
-
-    let entry_bits = (max_entries as f64).log2().ceil() as usize;
-    let mut entries: HashMap<i64, (Vec<u8>, Vec<u8>)> = HashMap::new();
-    let mut history: VecDeque<Vec<u8>> = VecDeque::new();
-
-    assert!(!reader.read_bit()?, "Dictionary encoding unsupported");
-
-    let mut entry_index = -1;
-    for _i in 0..num_entries {
-        entry_index += 1;
-        if !reader.read_bit()? {
-            entry_index = reader.read_bits_u32(entry_bits as u8)? as i64;
+impl State {
+    pub fn new() -> State {
+        State {
+            events: HashMap::new(),
+            players: HashMap::new(),
+            teams: HashMap::new(),
         }
+    }
 
-        assert!(entry_index >= 0 && entry_index < (max_entries as i64));
-
-        let entry: Vec<u8>;
-        let mut userdata: Vec<u8> = Vec::new();
-
-        if reader.read_bit()? {
-            // substring check
-            if reader.read_bit()? {
-                let index = reader.read_bits_u32(5)? as usize;
-                assert!(index < history.len(), "History index too large");
-                let bytes_to_copy = reader.read_bits_u32(5)? as usize;
-
-                let last = &history[index];
-
-                let substr = last.split_at(bytes_to_copy).0;
-                let suffix = reader.read_c_string()?;
-
-                entry = substr.iter().chain(suffix.iter()).copied().collect();
-            } else {
-                entry = reader.read_c_string()?;
+    pub fn handle_command(&mut self, cmd: Cmd) -> std::io::Result<()> {
+        match cmd {
+            Cmd::CreateStringTable(table) => {
+                if let Some(table) = create_string_table(table)? {
+                    for (i, info) in table {
+                        self.players.insert(i, Player::new(info));
+                    }
+                }
             }
+            Cmd::UserMessage(message) => {
+                handle_user_message(message);
+            }
+            Cmd::GameEvent(event) => {
+                self.handle_game_event(event);
+            }
+            Cmd::GameEventList(event_list) => {
+                self.events = read_event_names(event_list);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_game_event(&mut self, ev: netmessages_public::CsvcMsgGameEvent) {
+        let ignored = [
+            "player_footstep",
+            "weapon_fire",
+            "weapon_reload",
+            "player_hurt",
+            "item_pickup",
+        ];
+        if let Some((name, key_data)) = ev.eventid.and_then(|id| self.events.get(&id)) {
+            if ignored.contains(&name.as_str()) {
+                return;
+            }
+            //println!("{}", name);
+            if name == "round_announce_match_start" {
+                self.clear_stats();
+            } else if name == "item_equip" {
+                let mut item = None;
+                let mut userid = None;
+                for (i, key) in ev.keys.iter().enumerate() {
+                    let key_name = &key_data[&i];
+                    if key_name == "item" {
+                        item = Some(show_key(&key));
+                    } else if key_name == "userid" {
+                        userid = key.val_short;
+                    }
+                    //println!("- {} = {}", key_name, show_key(&key));
+                }
+                if let (Some(item), Some(userid)) = (item, userid) {
+                    //dbg!(&self.players.get(&userid));
+                    if let Some(player) = self.players.get_mut(&userid) {
+                        player.equipped = item;
+                    }
+                }
+            } else if name == "player_spawn" {
+                let mut userid = None;
+                let mut teamnum = None;
+                for (i, key) in ev.keys.iter().enumerate() {
+                    let key_name = &key_data[&i];
+                    //println!("- {} = {}", key_name, show_key(&key));
+                    if key_name == "userid" {
+                        userid = key.val_short;
+                    } else if key_name == "teamnum" {
+                        teamnum = key.val_short;
+                    }
+                }
+                if let (Some(userid), Some(teamnum)) = (userid, teamnum) {
+                    if teamnum == 2 || teamnum == 3 {
+                        self.teams.insert(userid, teamnum == 2);
+                    }
+                }
+            } else if name == "player_death" {
+                //println!("\n{}", name);
+                let mut userid = None;
+                let mut attackerid = None;
+                let mut assisterid = None;
+                let mut assisterflash = None;
+                for (i, key) in ev.keys.iter().enumerate() {
+                    let key_name = &key_data[&i];
+                    //println!("- {} = {}", key_name, show_key(&key));
+                    if key_name == "userid" {
+                        userid = key.val_short;
+                    } else if key_name == "attacker" {
+                        attackerid = key.val_short;
+                    } else if key_name == "assister" {
+                        assisterid = key.val_short;
+                    } else if key_name == "assistedflash" {
+                        assisterflash = key.val_bool;
+                    }
+                }
+                if let Some(id) = userid {
+                    if let Some(muna) = self.muna_in_hand(id) {
+                        println!("{}, (muna in hand = {})", self.players[&id].name, muna);
+                    }
+                }
+                if let (Some(kill), Some(death), assist) =
+                    (attackerid, userid, assisterid.unwrap_or(0))
+                {
+                    self.update_stats(kill, death, assist, assisterflash);
+                } else {
+                    panic!("{:?} {:?} {:?}", attackerid, userid, assisterid);
+                }
+            } else {
+                //println!("{}", name);
+                //for (i, key) in ev.keys.iter().enumerate() {
+                //    let key_name = &key_data[&i];
+                //    //if key_name == "item" {
+                //    //    item = Some(show_key(&key));
+                //    //} else if key_name == "userid" {
+                //    //    userid = key.val_short;
+                //    //}
+                //    println!("- {} = {}", key_name, show_key(&key));
+                //}
+            }
+        } else if let Some(_name) = ev.event_name {
+            //println!("{}", name);
+            //for key in ev.keys {
+            //    println!("- {:?} = {}", key, show_key(&key));
+            //}
         } else {
-            // If the string itself hasn't changed, this entry must already exist
-            let tuple = entries
-                .get(&entry_index)
-                .cloned()
-                .unwrap_or((vec![], vec![]));
-            entry = tuple.0;
-            userdata = tuple.1;
+            dbg!(&ev);
         }
-
-        if reader.read_bit()? {
-            // don't read the length, it's fixed length and the length was networked down already
-            if user_data_fixed_size {
-                userdata = vec![reader
-                    .read_bits_u32(user_data_size_bits.unwrap() as u8)?
-                    .try_into()
-                    .unwrap()];
-            } else {
-                let bytes = reader.read_bits_u32(14)? as usize;
-                let mut buf = vec![0; bytes];
-                reader.read_exact(&mut buf)?;
-                userdata = buf;
-            }
-
-            if name == "userinfo" {
-                let info = PlayerInfo::new(entry_index, &userdata)?;
-                PLAYERS.lock().unwrap().insert(info.user_id, info.name);
-            }
-        }
-
-        entries.insert(entry_index, (entry.clone(), userdata));
-
-        // add to history
-        if history.len() > 31 {
-            history.pop_front();
-        }
-
-        history.push_back(entry);
     }
 
-    // // parse client-side entries
-    // if reader.read_bit()? {
-    //   let numStrings = reader.read_u16().unwrap();
+    fn clear_stats(&mut self) {
+        for (_, player) in self.players.iter_mut() {
+            player.kills = 0;
+            player.deaths = 0;
+            player.assists = 0;
+            player.flash_assists = 0;
+        }
+    }
 
-    //   for i in 0..numStrings {
-    //     let entry = reader.read_c_string();
+    pub fn update_stats(
+        &mut self,
+        mut kill: i32,
+        death: i32,
+        assist: i32,
+        assistflash: Option<bool>,
+    ) {
+        if kill == 0 {
+            kill = death;
+            //println!("{} ate it", &self.players[&death].name);
+        } else if false {
+            if assist > 0 {
+                println!(
+                    "{} killed {} with {}assist from {}",
+                    &self.players[&kill].name,
+                    &self.players[&death].name,
+                    if assistflash == Some(true) {
+                        "flash "
+                    } else {
+                        ""
+                    },
+                    &self.players[&assist].name
+                );
+            } else {
+                println!(
+                    "{} killed {}",
+                    &self.players[&kill].name, &self.players[&death].name
+                );
+            }
+        }
+        //println!("");
 
-    //     if reader.read_bit()? {
-    //       let userDataSize = reader.read_u16().unwrap();
-    //       let mut buf = vec![0; userDataSize.into()];
-    //       reader.read_exact(&mut buf)?;
+        let killer_team = self.teams[&kill];
+        let victim_team = self.teams[&death];
+        let assist_team = if assist > 0 {
+            Some(self.teams[&assist])
+        } else {
+            None
+        };
 
-    //       dbg!(String::from_utf8_lossy(&buf));
-    //       unimplemented!();
-    //       // tslint:disable-next-line no-dead-store
-    //       //userData =
-    //       //  userDataCallback === undefined
-    //       //    ? userDataBuf
-    //       //    : userDataCallback(userDataBuf);
-    //     }
+        if kill == death || killer_team == victim_team {
+            // self.players.get_mut(&kill).unwrap().kills -= 1;
+        } else {
+            self.players.get_mut(&kill).unwrap().kills += 1;
+        }
 
-    //     // TODO: do something with client-side entries
-    //   }
-    // }
+        //dbg!(assist, assistflash, assist_team);
+        if let Some(assist_team) = assist_team {
+            let assister = self.players.get_mut(&assist).unwrap();
+            match (assistflash, assist_team == victim_team) {
+                (Some(true), true) => assister.flash_assists -= 1,
+                (Some(true), false) => {} //assister.flash_assists += 1,
+                (_, true) => assister.assists -= 1,
+                (_, false) => assister.assists += 1,
+            }
+        }
 
-    Ok(())
+        self.players.get_mut(&death).unwrap().deaths += 1;
+    }
+
+    fn muna_in_hand(&self, id: i32) -> Option<String> {
+        let item = self.players.get(&id).map(|p| &p.equipped);
+        let munas = [
+            "hegrenade",
+            "incgrenade",
+            "smokegrenade",
+            "flashbang",
+            "molotov",
+        ];
+        item.filter(|i| munas.contains(&i.as_ref())).cloned()
+    }
+
+    pub fn print_stats(&self) {
+        //dbg!(&self.teams);
+        //dbg!(&self.players);
+        let mut player_list = self
+            .players
+            .iter()
+            .filter(|(id, _)| self.teams.contains_key(id))
+            .map(|(id, player)| (self.teams[id], player))
+            .collect::<Vec<_>>();
+        player_list.sort_by_key(|(team, player)| (*team, -player.kills));
+        for (_, player) in player_list {
+            println!(
+                "{:16} (k/a/d {:3} {:3} {:3} ({} f))",
+                player.name, player.kills, player.assists, player.deaths, player.flash_assists
+            );
+        }
+    }
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -438,6 +358,8 @@ fn main() -> Result<(), std::io::Error> {
     let file = File::open(&args[1])?;
     let mut reader = BufReader::new(file);
     let _header = Header::new(&mut reader);
+
+    let mut state = State::new();
 
     loop {
         let header = PacketHeader::new(&mut reader);
@@ -457,7 +379,10 @@ fn main() -> Result<(), std::io::Error> {
 
                 let size: u32 = reader.read_u32().unwrap();
                 let slice = reader.read_u8_vec(size as usize).unwrap();
-                Cmd::parse(&mut (*slice).as_ref());
+                let mut read = (*slice).as_ref();
+                while let Some(cmd) = Cmd::parse(&mut read) {
+                    state.handle_command(cmd)?;
+                }
             }
             CmdType::ConsoleCmd => unimplemented!(),
             CmdType::UserCmd => unimplemented!(),
@@ -471,6 +396,8 @@ fn main() -> Result<(), std::io::Error> {
             //}
         }
     }
+
+    state.print_stats();
 
     Ok(())
 }

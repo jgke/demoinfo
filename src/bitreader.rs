@@ -193,13 +193,13 @@ impl<R: Read> BitReader<R> {
 }
 
 pub fn string_from_nilslice(s: &[u8]) -> String {
-    let data = s.iter()
+    let data = s
+        .iter()
         .copied()
         .take_while(|c| *c != 0)
         .collect::<Vec<u8>>();
     String::from_utf8_lossy(&data).to_string()
 }
-
 
 #[cfg(test)]
 mod test {
