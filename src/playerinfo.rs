@@ -1,7 +1,7 @@
 use crate::bitreader::{BitReader, ReadExtras};
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct PlayerInfo {
     pub version: u64,
     pub xuid: u64,

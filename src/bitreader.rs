@@ -204,6 +204,7 @@ pub fn string_from_nilslice(s: &[u8]) -> String {
 #[cfg(test)]
 mod test {
     use crate::*;
+    use std::io::Read;
 
     #[test]
     fn read_one_byte_bits() {

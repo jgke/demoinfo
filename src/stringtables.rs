@@ -3,7 +3,7 @@ use std::convert::TryInto;
 use std::io::Read;
 
 use crate::bitreader::{BitReader, ReadExtras};
-use crate::netmessages_public;
+use crate::csgo::netmessages_public;
 use crate::playerinfo::PlayerInfo;
 
 pub fn create_string_table(

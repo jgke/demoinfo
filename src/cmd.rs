@@ -2,7 +2,7 @@ use prost::Message;
 use std::io::Read;
 
 use crate::bitreader::ReadExtras;
-use crate::netmessages_public;
+use crate::csgo::netmessages_public;
 
 #[derive(Clone, Debug)]
 pub enum Cmd {
