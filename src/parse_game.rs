@@ -133,14 +133,13 @@ impl State {
                 for (i, key) in ev.keys.iter().enumerate() {
                     let key_name = &key_data[&i];
                     if key_name == "item" {
-                        item = Some(show_key(&key));
+                        item = Some(key.val_string.clone().unwrap());
                     } else if key_name == "userid" {
                         userid = key.val_short;
                     }
                     //println!("- {} = {}", key_name, show_key(&key));
                 }
                 if let (Some(item), Some(userid)) = (item, userid) {
-                    //dbg!(&self.players.get(&userid));
                     if let Some(player) = self.players.get_mut(&userid) {
                         player.equipped = item;
                     }
@@ -150,7 +149,6 @@ impl State {
                 let mut teamnum = None;
                 for (i, key) in ev.keys.iter().enumerate() {
                     let key_name = &key_data[&i];
-                    //println!("- {} = {}", key_name, show_key(&key));
                     if key_name == "userid" {
                         userid = key.val_short;
                     } else if key_name == "teamnum" {
