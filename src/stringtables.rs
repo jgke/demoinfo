@@ -6,46 +6,37 @@ use crate::bitreader::{BitReader, ReadExtras};
 use crate::csgo::netmessages_public;
 use crate::playerinfo::PlayerInfo;
 
-pub fn create_string_table(
-    msg: netmessages_public::CsvcMsgCreateStringTable,
-) -> std::io::Result<Option<HashMap<i32, PlayerInfo>>> {
+#[derive(Debug, Clone, Copy)]
+pub struct StringTable {
+    max_entries: i32,
+    entry_index: i64,
+    user_data_fixed_size: bool,
+    user_data_size_bits: Option<i32>,
+}
+
+fn calculate_string_table(table: &mut StringTable, table_entries: i32, data: &[u8]) -> std::io::Result<HashMap<i32, PlayerInfo>> {
     let mut players = HashMap::new();
 
-    let name = msg.name.unwrap();
-    //println!("Stringtables: {}", name);
-    if name != "userinfo" {
-        return Ok(None);
-    }
-    let max_entries = msg.max_entries.unwrap();
-    let num_entries = msg.num_entries.unwrap();
-    let user_data_fixed_size = msg.user_data_fixed_size.filter(|n| *n).is_some();
-    let user_data_size = msg.user_data_size.filter(|n| *n != 0);
-    let user_data_size_bits = msg.user_data_size_bits.filter(|n| *n != 0);
-
-    if user_data_fixed_size {
-        assert!(user_data_size.is_some());
-        assert!(user_data_size_bits.is_some());
+    if table.user_data_fixed_size {
+        assert!(table.user_data_size_bits.is_some());
     }
 
-    let _flags = msg.flags.unwrap();
-    let string_data: &[u8] = &msg.string_data.unwrap();
-    let reader_buf = &mut &*string_data;
+    let reader_buf = &mut &*data;
     let mut reader = BitReader::new(reader_buf);
 
-    let entry_bits = (max_entries as f64).log2().ceil() as usize;
+    let entry_bits = (table.max_entries as f64).log2().ceil() as usize;
     let mut entries: HashMap<i64, (Vec<u8>, Vec<u8>)> = HashMap::new();
     let mut history: VecDeque<Vec<u8>> = VecDeque::new();
 
     assert!(!reader.read_bit()?, "Dictionary encoding unsupported");
 
-    let mut entry_index = -1;
-    for _i in 0..num_entries {
-        entry_index += 1;
+    for _i in 0..table_entries {
+        table.entry_index += 1;
         if !reader.read_bit()? {
-            entry_index = reader.read_bits_u32(entry_bits as u8)? as i64;
+            table.entry_index = reader.read_bits_u32(entry_bits as u8)? as i64;
         }
 
-        assert!(entry_index >= 0 && entry_index < (max_entries as i64));
+        assert!(table.entry_index >= 0 && table.entry_index < (table.max_entries as i64));
 
         let entry: Vec<u8>;
         let mut userdata: Vec<u8> = Vec::new();
@@ -69,7 +60,7 @@ pub fn create_string_table(
         } else {
             // If the string itself hasn't changed, this entry must already exist
             let tuple = entries
-                .get(&entry_index)
+                .get(&table.entry_index)
                 .cloned()
                 .unwrap_or((vec![], vec![]));
             entry = tuple.0;
@@ -78,9 +69,9 @@ pub fn create_string_table(
 
         if reader.read_bit()? {
             // don't read the length, it's fixed length and the length was networked down already
-            if user_data_fixed_size {
+            if table.user_data_fixed_size {
                 userdata = vec![reader
-                    .read_bits_u32(user_data_size_bits.unwrap() as u8)?
+                    .read_bits_u32(table.user_data_size_bits.unwrap() as u8)?
                     .try_into()
                     .unwrap()];
             } else {
@@ -90,13 +81,11 @@ pub fn create_string_table(
                 userdata = buf;
             }
 
-            if name == "userinfo" {
-                let info = PlayerInfo::new(entry_index, &userdata)?;
-                players.insert(info.user_id, info);
-            }
+            let info = PlayerInfo::new(table.entry_index, &userdata)?;
+            players.insert(info.user_id, info);
         }
 
-        entries.insert(entry_index, (entry.clone(), userdata));
+        entries.insert(table.entry_index, (entry.clone(), userdata));
 
         // add to history
         if history.len() > 31 {
@@ -106,5 +95,42 @@ pub fn create_string_table(
         history.push_back(entry);
     }
 
-    Ok(Some(players))
+    Ok(players)
+}
+
+pub fn create_string_table(
+    msg: netmessages_public::CsvcMsgCreateStringTable,
+) -> std::io::Result<Option<(StringTable, HashMap<i32, PlayerInfo>)>> {
+    let name = msg.name.unwrap();
+    //println!("Stringtables: {}", name);
+    if name != "userinfo" {
+        return Ok(None);
+    }
+
+    let mut table = StringTable {
+        max_entries: msg.max_entries.unwrap(),
+        entry_index: -1,
+        user_data_fixed_size: msg.user_data_fixed_size.filter(|n| *n).is_some(),
+        user_data_size_bits: msg.user_data_size_bits.filter(|n| *n != 0),
+    };
+
+    if table.user_data_fixed_size {
+        assert!(table.user_data_size_bits.is_some());
+    }
+
+    let _flags = msg.flags.unwrap();
+    let string_data: &[u8] = &msg.string_data.unwrap();
+
+    let players = calculate_string_table(&mut table, msg.num_entries.unwrap(), string_data)?;
+
+    Ok(Some((table, players)))
+}
+
+pub fn update_string_table(
+    table: &mut StringTable,
+    msg: netmessages_public::CsvcMsgUpdateStringTable,
+) -> std::io::Result<HashMap<i32, PlayerInfo>> {
+    let string_data: &[u8] = &msg.string_data.unwrap();
+
+    calculate_string_table(table, msg.num_changed_entries.unwrap(), string_data)
 }

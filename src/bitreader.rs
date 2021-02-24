@@ -203,7 +203,7 @@ pub fn string_from_nilslice(s: &[u8]) -> String {
 
 #[cfg(test)]
 mod test {
-    use crate::*;
+    use crate::bitreader::*;
     use std::io::Read;
 
     #[test]

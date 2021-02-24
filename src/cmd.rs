@@ -7,6 +7,7 @@ use crate::csgo::netmessages_public;
 #[derive(Clone, Debug)]
 pub enum Cmd {
     CreateStringTable(netmessages_public::CsvcMsgCreateStringTable),
+    UpdateStringTable(netmessages_public::CsvcMsgUpdateStringTable),
     UserMessage(netmessages_public::CsvcMsgUserMessage),
     GameEvent(netmessages_public::CsvcMsgGameEvent),
     GameEventList(netmessages_public::CsvcMsgGameEventList),
@@ -27,6 +28,11 @@ impl Cmd {
                 12 => {
                     return Some(Cmd::CreateStringTable(
                         netmessages_public::CsvcMsgCreateStringTable::decode(&*data).unwrap(),
+                    ));
+                }
+                13 => {
+                    return Some(Cmd::UpdateStringTable(
+                        netmessages_public::CsvcMsgUpdateStringTable::decode(&*data).unwrap(),
                     ));
                 }
 

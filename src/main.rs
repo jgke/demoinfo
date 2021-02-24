@@ -17,7 +17,7 @@ use std::io::BufReader;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let file = File::open(&args[1])?;
-    let mut reader = BufReader::new(file);
+    let reader = BufReader::new(file);
 
     let mut rankmanager = ranks::RankManager::new()?;
 

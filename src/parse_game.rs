@@ -9,10 +9,12 @@ use crate::header::Header;
 use crate::csgo::netmessages_public::csvc_msg_game_event::KeyT;
 use crate::packet::{CmdType, DemoCmdInfo, PacketHeader};
 use crate::player::Player;
-use crate::stringtables::create_string_table;
+use crate::stringtables::{StringTable, create_string_table, update_string_table};
 
 #[derive(Clone, Debug)]
 struct State {
+    player_table: Option<StringTable>,
+    table_id: usize,
     events: HashMap<i32, (String, HashMap<usize, String>)>,
     players: HashMap<i32, Player>,
     teams: HashMap<i32, bool>,
@@ -84,18 +86,48 @@ fn read_event_names(
 impl State {
     pub fn new() -> State {
         State {
+            player_table: None,
+            table_id: 0,
             events: HashMap::new(),
             players: HashMap::new(),
             teams: HashMap::new(),
         }
     }
 
+    fn find_player_by_xuid(&self, xuid: i64) -> Option<i32> {
+        self.players
+            .iter()
+            .filter_map(|(i, p)| if p.info.xuid == xuid {
+                Some(*i)
+            } else {
+                None
+            })
+            .next()
+    }
+
     pub fn handle_command(&mut self, cmd: Cmd) -> std::io::Result<()> {
         match cmd {
             Cmd::CreateStringTable(table) => {
-                if let Some(table) = create_string_table(table)? {
-                    for (i, info) in table {
+                if let Some((table, players)) = create_string_table(table)? {
+                    self.player_table = Some(table);
+                    for (i, info) in players {
+                        dbg!(i, &info);
                         self.players.insert(i, Player::new(info));
+                    }
+                } else if self.player_table.is_none() {
+                    self.table_id += 1;
+                }
+            }
+            Cmd::UpdateStringTable(table) => {
+                if table.table_id == Some(self.table_id as i32) {
+                    for (i, info) in update_string_table(self.player_table.as_mut().unwrap(), table)? {
+                        if let Some(p) = self.find_player_by_xuid(info.xuid) {
+                            let mut player = self.players.remove(&p).unwrap();
+                            player.info = info;
+                            self.players.insert(i, player);
+                        } else {
+                            self.players.insert(i, Player::new(info));
+                        }
                     }
                 }
             }
@@ -258,21 +290,32 @@ impl State {
         if kill == death || killer_team == victim_team {
             // self.players.get_mut(&kill).unwrap().kills -= 1;
         } else {
-            self.players.get_mut(&kill).unwrap().kills += 1;
+            if let Some(killer) = self.players.get_mut(&kill) {
+                killer.kills += 1;
+            } else {
+                println!("WARN: Did not find player who killed with id {}", kill);
+            }
         }
 
         //dbg!(assist, assistflash, assist_team);
         if let (Some(assist), Some(assist_team)) = (assist, assist_team) {
-            let assister = self.players.get_mut(&assist).unwrap();
-            match (assist_flash, assist_team == victim_team) {
-                (true, true) => {} //assister.flash_assists -= 1,
-                (true, false) => assister.flash_assists += 1,
-                (false, true) => assister.assists -= 1,
-                (false, false) => assister.assists += 1,
+            if let Some(assister) = self.players.get_mut(&assist) {
+                match (assist_flash, assist_team == victim_team) {
+                    (true, true) => {} //assister.flash_assists -= 1,
+                    (true, false) => assister.flash_assists += 1,
+                    (false, true) => assister.assists -= 1,
+                    (false, false) => assister.assists += 1,
+                }
+            } else {
+                println!("WARN: Did not find player who assisted with id {}", assist);
             }
         }
 
-        self.players.get_mut(&death).unwrap().deaths += 1;
+        if let Some(victim) = self.players.get_mut(&death) {
+            victim.deaths += 1;
+        } else {
+            println!("WARN: Did not find player who died with id {}", death);
+        }
         Some(())
     }
 
@@ -374,7 +417,9 @@ pub fn parse_game<R: Read>(mut reader: R) -> Result<(Header, Vec<Player>, Vec<Pl
 
 #[cfg(test)]
 mod test {
-    use crate::*;
+    use crate::bitreader::*;
+    use crate::parse_game::*;
+    use crate::playerinfo::PlayerInfo;
 
     #[test]
     fn header_parse() {

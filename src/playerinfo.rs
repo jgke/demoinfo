@@ -4,7 +4,7 @@ use crate::bitreader::{BitReader, ReadExtras};
 #[derive(Clone, Debug, Hash)]
 pub struct PlayerInfo {
     pub version: u64,
-    pub xuid: u64,
+    pub xuid: i64,
     pub name: String,
     pub user_id: i32,
     pub guid: String,
@@ -23,7 +23,7 @@ impl PlayerInfo {
         let mut buf = BitReader::new(buf_ptr);
 
         let version = buf.read_u64_be()?;
-        let xuid = buf.read_u64_be()?;
+        let xuid = buf.read_i64_be()?;
         let name = buf.read_fixed_c_string(128)?;
         let user_id = buf.read_i32_be()?;
         let guid = buf.read_fixed_c_string(32)?;
