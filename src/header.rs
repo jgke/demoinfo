@@ -2,7 +2,7 @@ use std::io::Read;
 
 use crate::bitreader::{string_from_nilslice, ReadExtras};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Header {
     pub magic: String,
     pub demo_protocol: i32,
@@ -48,5 +48,9 @@ impl Header {
         assert_eq!(header.demo_protocol, 4);
 
         header
+    }
+
+    pub fn tickrate(&self) -> i32 {
+        ((self.playback_ticks as f32) / self.playback_time) as i32
     }
 }

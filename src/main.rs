@@ -1,14 +1,15 @@
 mod bitreader;
 mod cmd;
 mod csgo;
+mod game_event;
 mod header;
 mod packet;
+mod parse_game;
 mod player;
 mod playerinfo;
-mod parse_game;
 mod ranks;
-mod stringtables;
 mod stable_hasher;
+mod stringtables;
 
 use std::env;
 use std::fs::File;

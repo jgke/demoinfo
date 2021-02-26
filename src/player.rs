@@ -11,6 +11,9 @@ pub struct Player {
 
     pub equipped: String,
 
+    pub latest_muna: Option<String>,
+    pub muna_tick: i32,
+
     pub info: PlayerInfo,
 }
 
@@ -22,7 +25,11 @@ impl Player {
             assists: 0,
             flash_assists: 0,
             deaths: 0,
+
             equipped: "knife".to_string(),
+            latest_muna: None,
+            muna_tick: 0,
+
             info,
         }
     }

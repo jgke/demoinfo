@@ -14,7 +14,11 @@ pub struct StringTable {
     user_data_size_bits: Option<i32>,
 }
 
-fn calculate_string_table(table: &mut StringTable, table_entries: i32, data: &[u8]) -> std::io::Result<HashMap<i32, PlayerInfo>> {
+fn calculate_string_table(
+    table: &mut StringTable,
+    table_entries: i32,
+    data: &[u8],
+) -> std::io::Result<HashMap<i32, PlayerInfo>> {
     let mut players = HashMap::new();
 
     if table.user_data_fixed_size {

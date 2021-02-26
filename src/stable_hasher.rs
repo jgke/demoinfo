@@ -1,7 +1,7 @@
 use std::hash::Hasher;
 
 pub struct StableHasher {
-    state: u64
+    state: u64,
 }
 
 impl StableHasher {

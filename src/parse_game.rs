@@ -4,23 +4,30 @@ use std::io::Read;
 
 use crate::bitreader::*;
 use crate::cmd::Cmd;
-use crate::csgo::*;
-use crate::header::Header;
 use crate::csgo::netmessages_public::csvc_msg_game_event::KeyT;
+use crate::csgo::*;
+use crate::game_event::{Event, EventContext};
+use crate::header::Header;
 use crate::packet::{CmdType, DemoCmdInfo, PacketHeader};
 use crate::player::Player;
-use crate::stringtables::{StringTable, create_string_table, update_string_table};
+use crate::stringtables::{create_string_table, update_string_table, StringTable};
 
 #[derive(Clone, Debug)]
 struct State {
+    header: Header,
     player_table: Option<StringTable>,
     table_id: usize,
-    events: HashMap<i32, (String, HashMap<usize, String>)>,
+    current_tick: i32,
+    current_round: i32,
+    score: (i32, i32),
+
+    events: EventContext,
     players: HashMap<i32, Player>,
     teams: HashMap<i32, bool>,
 }
 
 #[rustfmt::skip]
+#[allow(dead_code)]
 fn show_key(k: &KeyT) -> String {
     match k {
         KeyT { val_string: Some(s), .. } => format!("[string] {}", s),
@@ -84,11 +91,16 @@ fn read_event_names(
 }
 
 impl State {
-    pub fn new() -> State {
+    pub fn new(header: Header) -> State {
         State {
+            header,
             player_table: None,
             table_id: 0,
-            events: HashMap::new(),
+            current_tick: 0,
+            current_round: 0,
+            score: (0, 0),
+
+            events: EventContext::new(HashMap::new()),
             players: HashMap::new(),
             teams: HashMap::new(),
         }
@@ -97,12 +109,14 @@ impl State {
     fn find_player_by_xuid(&self, xuid: i64) -> Option<i32> {
         self.players
             .iter()
-            .filter_map(|(i, p)| if p.info.xuid == xuid {
-                Some(*i)
-            } else {
-                None
-            })
+            .filter_map(|(i, p)| if p.info.xuid == xuid { Some(*i) } else { None })
             .next()
+    }
+
+    pub fn print_current_time(&self) {
+        let second = self.current_tick / self.header.tickrate();
+
+        println!("{}m {}s", second / 60, second % 60);
     }
 
     pub fn handle_command(&mut self, cmd: Cmd) -> std::io::Result<()> {
@@ -111,7 +125,6 @@ impl State {
                 if let Some((table, players)) = create_string_table(table)? {
                     self.player_table = Some(table);
                     for (i, info) in players {
-                        dbg!(i, &info);
                         self.players.insert(i, Player::new(info));
                     }
                 } else if self.player_table.is_none() {
@@ -120,7 +133,9 @@ impl State {
             }
             Cmd::UpdateStringTable(table) => {
                 if table.table_id == Some(self.table_id as i32) {
-                    for (i, info) in update_string_table(self.player_table.as_mut().unwrap(), table)? {
+                    for (i, info) in
+                        update_string_table(self.player_table.as_mut().unwrap(), table)?
+                    {
                         if let Some(p) = self.find_player_by_xuid(info.xuid) {
                             let mut player = self.players.remove(&p).unwrap();
                             player.info = info;
@@ -138,150 +153,75 @@ impl State {
                 self.handle_game_event(event);
             }
             Cmd::GameEventList(event_list) => {
-                self.events = read_event_names(event_list);
+                self.events = EventContext::new(read_event_names(event_list));
             }
         }
         Ok(())
     }
 
     fn handle_game_event(&mut self, ev: netmessages_public::CsvcMsgGameEvent) {
-        let ignored = [
-            "player_footstep",
-            "weapon_fire",
-            "weapon_reload",
-            "player_hurt",
-            "item_pickup",
-        ];
-        if let Some((name, key_data)) = ev.eventid.and_then(|id| self.events.get(&id)) {
-            if ignored.contains(&name.as_str()) {
-                return;
+        match self.events.parse_game_event(ev) {
+            Event::Filtered => {}
+            Event::BeginNewMatch => self.clear_stats(),
+            Event::RoundStart => {
+                self.current_round += 1;
+                println!("--\nRound {}", self.current_round);
+                self.print_current_time();
             }
-            //println!("{}", name);
-            if name == "round_announce_match_start" {
-                self.clear_stats();
-            } else if name == "item_equip" {
-                let mut item = None;
-                let mut userid = None;
-                for (i, key) in ev.keys.iter().enumerate() {
-                    let key_name = &key_data[&i];
-                    if key_name == "item" {
-                        item = Some(key.val_string.clone().unwrap());
-                    } else if key_name == "userid" {
-                        userid = key.val_short;
-                    }
-                    //println!("- {} = {}", key_name, show_key(&key));
+            Event::RoundEnd(winner) => {
+                if winner {
+                    println!("T win");
+                    self.score.0 += 1;
+                } else {
+                    println!("CT win");
+                    self.score.1 += 1;
                 }
-                if let (Some(item), Some(userid)) = (item, userid) {
-                    if let Some(player) = self.players.get_mut(&userid) {
-                        player.equipped = item;
-                    }
+                println!("Score: {:?}", self.score);
+            }
+            Event::ItemEquip(userid, item) => {
+                self.equip(userid, item);
+            }
+            Event::PlayerSpawn(userid, team) => {
+                self.teams.insert(userid, team);
+            }
+            Event::PlayerDeath {
+                victim,
+                killer,
+                assist,
+                flash_assist,
+            } => {
+                if let Some((muna, tick)) = self.muna_in_hand(victim) {
+                    println!(
+                        "{}, (muna in hand = {}, age = {:.1}s)",
+                        self.players[&victim].name, muna, tick
+                    );
                 }
-            } else if name == "player_spawn" {
-                let mut userid = None;
-                let mut teamnum = None;
-                for (i, key) in ev.keys.iter().enumerate() {
-                    let key_name = &key_data[&i];
-                    if key_name == "userid" {
-                        userid = key.val_short;
-                    } else if key_name == "teamnum" {
-                        teamnum = key.val_short;
-                    }
-                }
-                if let (Some(userid), Some(teamnum)) = (userid, teamnum) {
-                    if teamnum == 2 || teamnum == 3 {
-                        self.teams.insert(userid, teamnum == 2);
-                    }
-                }
-            } else if name == "player_death" {
-                //println!("\n{}", name);
-                let mut userid = None;
-                let mut attackerid = None;
-                let mut assisterid = None;
-                let mut assisterflash = None;
-                for (i, key) in ev.keys.iter().enumerate() {
-                    let key_name = &key_data[&i];
-                    //println!("- {} = {}", key_name, show_key(&key));
-                    if key_name == "userid" {
-                        userid = key.val_short;
-                    } else if key_name == "attacker" {
-                        attackerid = key.val_short;
-                    } else if key_name == "assister" {
-                        assisterid = key.val_short;
-                    } else if key_name == "assistedflash" {
-                        assisterflash = key.val_bool;
-                    }
-                }
-                let id = userid.unwrap();
-                if let Some(muna) = self.muna_in_hand(id) {
-                    println!("{}, (muna in hand = {})", self.players[&id].name, muna);
-                }
-                self.update_stats(
-                    attackerid.filter(|id| *id > 0).unwrap_or(id),
-                    id,
-                    assisterid.filter(|id| *id > 0),
-                    assisterflash.unwrap_or(false));
-            } else {
+                self.update_stats(victim, killer, assist, flash_assist);
+            }
+            Event::Other(_name) => {
+                //self.print_current_time();
                 //println!("{}", name);
-                //for (i, key) in ev.keys.iter().enumerate() {
-                //    let key_name = &key_data[&i];
-                //    //if key_name == "item" {
-                //    //    item = Some(show_key(&key));
-                //    //} else if key_name == "userid" {
-                //    //    userid = key.val_short;
-                //    //}
-                //    println!("- {} = {}", key_name, show_key(&key));
-                //}
             }
-        } else if let Some(_name) = ev.event_name {
-            //println!("{}", name);
-            //for key in ev.keys {
-            //    println!("- {:?} = {}", key, show_key(&key));
-            //}
-        } else {
-            dbg!(&ev);
         }
     }
 
     fn clear_stats(&mut self) {
+        println!("------\n\n");
+        self.current_round = 0;
+        self.score = (0, 0);
         for (_, player) in self.players.iter_mut() {
-            player.kills = 0;
-            player.deaths = 0;
-            player.assists = 0;
-            player.flash_assists = 0;
+            *player = Player::new(player.info.clone());
         }
     }
 
     pub fn update_stats(
         &mut self,
-        mut kill: i32,
         death: i32,
+        killer: Option<i32>,
         assist: Option<i32>,
-        assist_flash: bool
+        assist_flash: bool,
     ) -> Option<()> {
-        if kill == 0 {
-            kill = death;
-            //println!("{} ate it", &self.players[&death].name);
-        } else if false {
-            if let Some(assist) = assist {
-                println!(
-                    "{} killed {} with {}assist from {}",
-                    &self.players[&kill].name,
-                    &self.players[&death].name,
-                    if assist_flash {
-                        "flash "
-                    } else {
-                        ""
-                    },
-                    &self.players[&assist].name
-                );
-            } else {
-                println!(
-                    "{} killed {}",
-                    &self.players[&kill].name, &self.players[&death].name
-                );
-            }
-        }
-        //println!("");
+        let kill = killer.unwrap_or(death);
 
         let killer_team = *self.teams.get(&kill)?;
         let victim_team = *self.teams.get(&death)?;
@@ -289,12 +229,10 @@ impl State {
 
         if kill == death || killer_team == victim_team {
             // self.players.get_mut(&kill).unwrap().kills -= 1;
+        } else if let Some(killer) = self.players.get_mut(&kill) {
+            killer.kills += 1;
         } else {
-            if let Some(killer) = self.players.get_mut(&kill) {
-                killer.kills += 1;
-            } else {
-                println!("WARN: Did not find player who killed with id {}", kill);
-            }
+            println!("WARN: Did not find player who killed with id {}", kill);
         }
 
         //dbg!(assist, assistflash, assist_team);
@@ -319,8 +257,7 @@ impl State {
         Some(())
     }
 
-    fn muna_in_hand(&self, id: i32) -> Option<String> {
-        let item = self.players.get(&id).map(|p| &p.equipped);
+    fn equip(&mut self, id: i32, item: String) {
         let munas = [
             "hegrenade",
             "incgrenade",
@@ -328,12 +265,30 @@ impl State {
             "flashbang",
             "molotov",
         ];
-        item.filter(|i| munas.contains(&i.as_ref())).cloned()
+
+        let mut player = self.players.get_mut(&id).unwrap();
+        if munas.contains(&item.as_str()) {
+            player.latest_muna = Some(item.clone());
+            player.muna_tick = self.current_tick;
+        }
+        player.equipped = item;
+    }
+
+    fn muna_in_hand(&self, id: i32) -> Option<(String, f32)> {
+        self.players
+            .get(&id)
+            .map(|p| {
+                (
+                    p.equipped.to_string(),
+                    (self.current_tick - p.muna_tick) as f32 / self.header.tickrate() as f32,
+                )
+            })
+            .filter(|(_, time)| time < &2.5)
     }
 
     pub fn print_stats(&self) {
-        //dbg!(&self.teams);
-        //dbg!(&self.players);
+        println!("Score: {} - {}", self.score.0, self.score.1);
+        let mut current_team = None;
         let mut player_list = self
             .players
             .iter()
@@ -341,7 +296,11 @@ impl State {
             .map(|(id, player)| (self.teams[id], player))
             .collect::<Vec<_>>();
         player_list.sort_by_key(|(team, player)| (*team, -player.kills));
-        for (_, player) in player_list {
+        for (team, player) in player_list {
+            if current_team != Some(team) {
+                current_team = Some(team);
+                println!("Team {}:", if !team { 1 } else { 2 });
+            }
             println!(
                 "{:16} (k/a/d {:3} {:3} {:3} ({} f))",
                 player.name, player.kills, player.assists, player.deaths, player.flash_assists
@@ -350,13 +309,17 @@ impl State {
     }
 }
 
-pub fn parse_game<R: Read>(mut reader: R) -> Result<(Header, Vec<Player>, Vec<Player>), std::io::Error> {
-    let mut state = State::new();
-
+pub fn parse_game<R: Read>(
+    mut reader: R,
+) -> Result<(Header, Vec<Player>, Vec<Player>), std::io::Error> {
     let header = Header::new(&mut reader);
+    println!("Tickrate: {} ticks/second", header.tickrate());
+
+    let mut state = State::new(header.clone());
 
     loop {
         let header = PacketHeader::new(&mut reader);
+        state.current_tick = header.tick;
         match header.cmd_type {
             CmdType::SyncTick => {
                 continue;
@@ -394,20 +357,20 @@ pub fn parse_game<R: Read>(mut reader: R) -> Result<(Header, Vec<Player>, Vec<Pl
     state.print_stats();
 
     let mut team_a = state
-            .players
-            .iter()
-            .filter(|(id, _)| state.teams.get(id) == Some(&true))
-            .map(|(_, p)| p)
-            .cloned()
-            .collect::<Vec<_>>();
+        .players
+        .iter()
+        .filter(|(id, _)| state.teams.get(id) == Some(&true))
+        .map(|(_, p)| p)
+        .cloned()
+        .collect::<Vec<_>>();
 
     let mut team_b = state
-            .players
-            .iter()
-            .filter(|(id, _)| state.teams.get(id) == Some(&false))
-            .map(|(_, p)| p)
-            .cloned()
-            .collect::<Vec<_>>();
+        .players
+        .iter()
+        .filter(|(id, _)| state.teams.get(id) == Some(&false))
+        .map(|(_, p)| p)
+        .cloned()
+        .collect::<Vec<_>>();
 
     team_a.sort_by_key(|p| p.info.xuid);
     team_b.sort_by_key(|p| p.info.xuid);
@@ -475,46 +438,55 @@ mod test {
 
     fn stat(state: &State, id: i32) -> (i32, i32, i32, i32) {
         let player = &state.players[&id];
-        (player.kills, player.assists, player.deaths, player.flash_assists)
+        (
+            player.kills,
+            player.assists,
+            player.deaths,
+            player.flash_assists,
+        )
     }
 
     #[test]
     fn kills() {
-        let mut state = State::new();
-        let killer = gen_player(&mut state, 1, false);
+        let mut state = State::new(Header {
+            playback_time: 1.0,
+            playback_ticks: 1,
+            ..Default::default()
+        });
+        let killer = Some(gen_player(&mut state, 1, false));
         let victim = gen_player(&mut state, 2, true);
         let assister = gen_player(&mut state, 3, false);
         let friendly_assister = gen_player(&mut state, 4, true);
 
-        assert_eq!(stat(&state, killer), (0, 0, 0, 0));
+        assert_eq!(stat(&state, killer.unwrap()), (0, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 0, 0));
         assert_eq!(stat(&state, assister), (0, 0, 0, 0));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(killer, victim, None, false);
+        state.update_stats(victim, killer, None, false);
 
-        assert_eq!(stat(&state, killer), (1, 0, 0, 0));
+        assert_eq!(stat(&state, killer.unwrap()), (1, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 1, 0));
         assert_eq!(stat(&state, assister), (0, 0, 0, 0));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(killer, victim, Some(assister), false);
+        state.update_stats(victim, killer, Some(assister), false);
 
-        assert_eq!(stat(&state, killer), (2, 0, 0, 0));
+        assert_eq!(stat(&state, killer.unwrap()), (2, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 2, 0));
         assert_eq!(stat(&state, assister), (0, 1, 0, 0));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(killer, victim, Some(assister), true);
+        state.update_stats(victim, killer, Some(assister), true);
 
-        assert_eq!(stat(&state, killer), (3, 0, 0, 0));
+        assert_eq!(stat(&state, killer.unwrap()), (3, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 3, 0));
         assert_eq!(stat(&state, assister), (0, 1, 0, 1));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(killer, victim, Some(friendly_assister), false);
+        state.update_stats(victim, killer, Some(friendly_assister), false);
 
-        assert_eq!(stat(&state, killer), (4, 0, 0, 0));
+        assert_eq!(stat(&state, killer.unwrap()), (4, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 4, 0));
         assert_eq!(stat(&state, assister), (0, 1, 0, 1));
         assert_eq!(stat(&state, friendly_assister), (0, -1, 0, 0));
