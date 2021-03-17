@@ -17,7 +17,8 @@ use std::io::BufReader;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(
-        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
 
     let args: Vec<String> = env::args().collect();
     let file = File::open(&args[1])?;

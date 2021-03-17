@@ -211,7 +211,6 @@ impl RankManager {
             let winner_gains = 100.0 * surprise;
             let loser_loses = -100.0 * surprise;
 
-
             dbg!(winner_rank, loser_rank, surprise, winner_gains, loser_loses);
 
             RankManager::update_team_ranks(&tx, winner_ranks, winners, winner_gains)?;

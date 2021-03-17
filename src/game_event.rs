@@ -1,6 +1,6 @@
 use crate::csgo::netmessages_public;
+use log::{log_enabled, trace, Level};
 use std::collections::HashMap;
-use log::{trace, log_enabled, Level};
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -112,7 +112,7 @@ impl EventContext {
                             assisterflash = key.val_bool;
                         } else if key_name == "weapon" {
                             weapon = key.val_string.as_ref().map(|s| s.as_str());
-                        } 
+                        }
                     }
                     let id = userid.unwrap();
                     Event::PlayerDeath {
@@ -120,12 +120,10 @@ impl EventContext {
                         killer: attackerid.filter(|id| *id > 0),
                         assist: assisterid.filter(|id| *id > 0),
                         flash_assist: assisterflash.unwrap_or(false),
-                        weapon: weapon.unwrap_or("").to_string()
+                        weapon: weapon.unwrap_or("").to_string(),
                     }
                 }
-                name => {
-                    Event::Other(name.to_string())
-                }
+                name => Event::Other(name.to_string()),
             }
         } else if let Some(name) = ev.event_name {
             trace!("{}", &name);
