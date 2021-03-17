@@ -1,11 +1,13 @@
 use crate::csgo::netmessages_public;
 use std::collections::HashMap;
+use log::{trace, log_enabled, Level};
 
 #[derive(Clone, Debug)]
 pub enum Event {
     Filtered,
     BeginNewMatch,
     RoundStart,
+    RoundOfficiallyEnded,
     RoundEnd(bool),
     ItemEquip(i32, String),
     PlayerSpawn(i32, bool),
@@ -14,6 +16,7 @@ pub enum Event {
         killer: Option<i32>,
         assist: Option<i32>,
         flash_assist: bool,
+        weapon: String,
     },
     Other(String),
 }
@@ -39,10 +42,17 @@ impl EventContext {
             if ignored.contains(&name.as_str()) {
                 return Event::Filtered;
             }
-            //println!("{}", name);
+            if log_enabled!(Level::Trace) {
+                trace!("{}", &name);
+                for (i, key) in ev.keys.iter().enumerate() {
+                    let key_name = &key_data[&i];
+                    trace!("- {} = {}", key_name, crate::parse_game::show_key(&key));
+                }
+            }
             match name.as_str() {
                 "begin_new_match" => Event::BeginNewMatch,
                 "round_announce_match_start" | "round_start" => Event::RoundStart,
+                "round_officially_ended" => Event::RoundOfficiallyEnded,
                 "round_end" => {
                     let mut winner_team = None;
                     for (i, key) in ev.keys.iter().enumerate() {
@@ -89,6 +99,7 @@ impl EventContext {
                     let mut attackerid = None;
                     let mut assisterid = None;
                     let mut assisterflash = None;
+                    let mut weapon: Option<&str> = None;
                     for (i, key) in ev.keys.iter().enumerate() {
                         let key_name = &key_data[&i];
                         if key_name == "userid" {
@@ -99,7 +110,9 @@ impl EventContext {
                             assisterid = key.val_short;
                         } else if key_name == "assistedflash" {
                             assisterflash = key.val_bool;
-                        }
+                        } else if key_name == "weapon" {
+                            weapon = key.val_string.as_ref().map(|s| s.as_str());
+                        } 
                     }
                     let id = userid.unwrap();
                     Event::PlayerDeath {
@@ -107,22 +120,16 @@ impl EventContext {
                         killer: attackerid.filter(|id| *id > 0),
                         assist: assisterid.filter(|id| *id > 0),
                         flash_assist: assisterflash.unwrap_or(false),
+                        weapon: weapon.unwrap_or("").to_string()
                     }
                 }
                 name => {
-                    //for (i, key) in keys.iter().enumerate() {
-                    //    let key_name = &key_data[&i];
-                    //    println!("- {} = {}", key_name, show_key(&key));
-                    //}
                     Event::Other(name.to_string())
                 }
             }
         } else if let Some(name) = ev.event_name {
+            trace!("{}", &name);
             Event::Other(name)
-            //for (i, key) in keys.iter().enumerate() {
-            //    let key_name = &key_data[&i];
-            //    println!("- {} = {}", key_name, show_key(&key));
-            //}
         } else {
             panic!("{:?}", ev);
         }

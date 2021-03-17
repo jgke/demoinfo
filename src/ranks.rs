@@ -6,6 +6,8 @@ use crate::header::Header;
 use crate::player::Player;
 use crate::stable_hasher::StableHasher;
 
+use log::warn;
+
 pub struct RankManager {
     connection: Connection,
 }
@@ -200,22 +202,23 @@ impl RankManager {
 
         if game.is_none() {
             tx.execute("INSERT INTO game (id) VALUES (?)", params![&game_hash])?;
+
+            let (winner_rank, winner_ranks) = team_rank(&tx, winners)?;
+            let (loser_rank, loser_ranks) = team_rank(&tx, losers)?;
+
+            let surprise = loser_rank / winner_rank;
+
+            let winner_gains = 100.0 * surprise;
+            let loser_loses = -100.0 * surprise;
+
+
+            dbg!(winner_rank, loser_rank, surprise, winner_gains, loser_loses);
+
+            RankManager::update_team_ranks(&tx, winner_ranks, winners, winner_gains)?;
+            RankManager::update_team_ranks(&tx, loser_ranks, losers, loser_loses)?;
         } else {
-            panic!("Already found game");
+            warn!("Already found game");
         }
-
-        let (winner_rank, winner_ranks) = team_rank(&tx, winners)?;
-        let (loser_rank, loser_ranks) = team_rank(&tx, losers)?;
-
-        let surprise = loser_rank / winner_rank;
-
-        let winner_gains = 100.0 * surprise;
-        let loser_loses = -100.0 * surprise;
-
-        dbg!(winner_rank, loser_rank, surprise, winner_gains, loser_loses);
-
-        RankManager::update_team_ranks(&tx, winner_ranks, winners, winner_gains)?;
-        RankManager::update_team_ranks(&tx, loser_ranks, losers, loser_loses)?;
 
         tx.commit()?;
 

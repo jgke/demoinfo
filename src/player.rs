@@ -9,6 +9,8 @@ pub struct Player {
     pub flash_assists: i32,
     pub deaths: i32,
 
+    pub kast: i32,
+
     pub equipped: String,
 
     pub latest_muna: Option<String>,
@@ -25,6 +27,8 @@ impl Player {
             assists: 0,
             flash_assists: 0,
             deaths: 0,
+
+            kast: 0,
 
             equipped: "knife".to_string(),
             latest_muna: None,

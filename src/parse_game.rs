@@ -1,6 +1,9 @@
 use prost::Message;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::io::Read;
+
+use log::{info, debug, trace, warn};
 
 use crate::bitreader::*;
 use crate::cmd::Cmd;
@@ -11,6 +14,17 @@ use crate::header::Header;
 use crate::packet::{CmdType, DemoCmdInfo, PacketHeader};
 use crate::player::Player;
 use crate::stringtables::{create_string_table, update_string_table, StringTable};
+
+const TRADE_TIME_LIMIT_IN_SECONDS: f32 = 18.2;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlayerState {
+    Killed,
+    Assisted,
+    Survived,
+    Traded,
+    Died(i32, i32)
+}
 
 #[derive(Clone, Debug)]
 struct State {
@@ -23,12 +37,13 @@ struct State {
 
     events: EventContext,
     players: HashMap<i32, Player>,
+    current_round_player_state: HashMap<i32, PlayerState>,
     teams: HashMap<i32, bool>,
 }
 
 #[rustfmt::skip]
 #[allow(dead_code)]
-fn show_key(k: &KeyT) -> String {
+pub fn show_key(k: &KeyT) -> String {
     match k {
         KeyT { val_string: Some(s), .. } => format!("[string] {}", s),
         KeyT { val_float: Some(n), .. } => format!("[float] {}", n),
@@ -90,6 +105,10 @@ fn read_event_names(
     result
 }
 
+fn as_seconds<N>(ticks: N, tickrate: i32) -> f32 where i64: TryFrom<N> {
+    (i64::try_from(ticks).ok().unwrap() as f32) / tickrate as f32
+}
+
 impl State {
     pub fn new(header: Header) -> State {
         State {
@@ -102,6 +121,7 @@ impl State {
 
             events: EventContext::new(HashMap::new()),
             players: HashMap::new(),
+            current_round_player_state: HashMap::new(),
             teams: HashMap::new(),
         }
     }
@@ -113,10 +133,10 @@ impl State {
             .next()
     }
 
-    pub fn print_current_time(&self) {
+    pub fn current_time(&self) -> String {
         let second = self.current_tick / self.header.tickrate();
 
-        println!("{}m {}s", second / 60, second % 60);
+        format!("{}m {}s", second / 60, second % 60)
     }
 
     pub fn handle_command(&mut self, cmd: Cmd) -> std::io::Result<()> {
@@ -159,24 +179,57 @@ impl State {
         Ok(())
     }
 
+    fn handle_round_start(&mut self) {
+        self.current_round += 1;
+
+        debug!("--\nRound {}\n{}", self.current_round, self.current_time());
+        if self.current_round == 16 {
+            debug!("Swapping sides");
+            self.score = (self.score.1, self.score.0);
+        }
+    }
+
+    fn update_player_kast_score(&mut self) {
+        debug!("{} {:?}", 50, &self.current_round_player_state[&50]);
+        debug!("{} {:?}", 56, &self.current_round_player_state[&56]);
+        for (i, state) in &self.current_round_player_state {
+            match state {
+                PlayerState::Killed | PlayerState::Assisted | PlayerState::Survived | PlayerState::Traded => {
+                    self.players.get_mut(&i).unwrap().kast += 1;
+                }
+                PlayerState::Died(_, _) =>  {
+                }
+            }
+        }
+    }
+
+    fn clear_kast(&mut self) {
+        self.current_round_player_state = self.players.keys()
+            .map(|k| (*k, PlayerState::Survived))
+            .collect();
+    }
+
     fn handle_game_event(&mut self, ev: netmessages_public::CsvcMsgGameEvent) {
         match self.events.parse_game_event(ev) {
             Event::Filtered => {}
             Event::BeginNewMatch => self.clear_stats(),
-            Event::RoundStart => {
-                self.current_round += 1;
-                println!("--\nRound {}", self.current_round);
-                self.print_current_time();
+            Event::RoundStart => self.handle_round_start(),
+            Event::RoundOfficiallyEnded => {
+                self.update_player_kast_score();
+                self.clear_kast();
             }
             Event::RoundEnd(winner) => {
                 if winner {
-                    println!("T win");
+                    debug!("T win");
                     self.score.0 += 1;
                 } else {
-                    println!("CT win");
+                    debug!("CT win");
                     self.score.1 += 1;
                 }
-                println!("Score: {:?}", self.score);
+                if self.score.0 == 16 || self.score.1 == 16 {
+                    self.update_player_kast_score();
+                }
+                debug!("Score: {:?}", self.score);
             }
             Event::ItemEquip(userid, item) => {
                 self.equip(userid, item);
@@ -189,28 +242,72 @@ impl State {
                 killer,
                 assist,
                 flash_assist,
+                weapon
             } => {
                 if let Some((muna, tick)) = self.muna_in_hand(victim) {
-                    println!(
+                    debug!(
                         "{}, (muna in hand = {}, age = {:.1}s)",
                         self.players[&victim].name, muna, tick
                     );
                 }
-                self.update_stats(victim, killer, assist, flash_assist);
+                self.update_stats(victim, killer, assist, flash_assist, &weapon);
             }
-            Event::Other(_name) => {
-                //self.print_current_time();
-                //println!("{}", name);
+            Event::Other(name) => {
+                trace!("{} {}", name, self.current_time());
             }
         }
     }
 
     fn clear_stats(&mut self) {
-        println!("------\n\n");
+        debug!("------\n\n");
         self.current_round = 0;
         self.score = (0, 0);
         for (_, player) in self.players.iter_mut() {
             *player = Player::new(player.info.clone());
+        }
+    }
+
+    pub fn update_kast(&mut self, killer: Option<i32>, assister: Option<i32>, victim: i32) {
+        if let Some(killer) = killer {
+            if killer != victim {
+                self.current_round_player_state.insert(killer, PlayerState::Killed);
+            }
+        }
+
+        if let Some(assister) = assister {
+            self.current_round_player_state.insert(assister, PlayerState::Assisted);
+        }
+
+        if self.current_round_player_state.get(&victim).filter(|s| **s != PlayerState::Survived).is_none() {
+            self.current_round_player_state.insert(victim, PlayerState::Died(killer.unwrap_or(0), self.current_tick));
+        }
+
+        for (traded_id, state) in self.current_round_player_state.iter_mut() {
+            if let PlayerState::Died(maybe_traded_killer, tick) = *state {
+                let trade_time = as_seconds(self.current_tick - tick, self.header.tickrate());
+                if maybe_traded_killer == victim && trade_time < TRADE_TIME_LIMIT_IN_SECONDS {
+                    debug!(
+                        "[{}]{} traded [{}]{} by killing [{}]{} ({}s)",
+                        killer.unwrap(),
+                        &self.players[&killer.unwrap()].name,
+                        traded_id,
+                        &self.players[&traded_id].name,
+                        victim,
+                        &self.players[&victim].name,
+                        trade_time);
+                    *state = PlayerState::Traded;
+                } else if maybe_traded_killer == victim {
+                    debug!(
+                        "[{}]{} was too late to trade [{}]{} by killing [{}]{} ({}s)",
+                        killer.unwrap(),
+                        &self.players[&killer.unwrap()].name,
+                        traded_id,
+                        &self.players[&traded_id].name,
+                        victim,
+                        &self.players[&victim].name,
+                        trade_time);
+                }
+            }
         }
     }
 
@@ -220,7 +317,9 @@ impl State {
         killer: Option<i32>,
         assist: Option<i32>,
         assist_flash: bool,
+        _weapon: &str
     ) -> Option<()> {
+        self.update_kast(killer, assist, death);
         let kill = killer.unwrap_or(death);
 
         let killer_team = *self.teams.get(&kill)?;
@@ -232,7 +331,7 @@ impl State {
         } else if let Some(killer) = self.players.get_mut(&kill) {
             killer.kills += 1;
         } else {
-            println!("WARN: Did not find player who killed with id {}", kill);
+            warn!("Did not find player who killed with id {}", kill);
         }
 
         //dbg!(assist, assistflash, assist_team);
@@ -240,19 +339,25 @@ impl State {
             if let Some(assister) = self.players.get_mut(&assist) {
                 match (assist_flash, assist_team == victim_team) {
                     (true, true) => {} //assister.flash_assists -= 1,
-                    (true, false) => assister.flash_assists += 1,
-                    (false, true) => assister.assists -= 1,
-                    (false, false) => assister.assists += 1,
+                    (true, false) => {
+                        assister.flash_assists += 1;
+                    }
+                    (false, true) => {
+                        assister.assists -= 1;
+                    }
+                    (false, false) => {
+                        assister.assists += 1;
+                    }
                 }
             } else {
-                println!("WARN: Did not find player who assisted with id {}", assist);
+                warn!("Did not find player who assisted with id {}", assist);
             }
         }
 
         if let Some(victim) = self.players.get_mut(&death) {
             victim.deaths += 1;
         } else {
-            println!("WARN: Did not find player who died with id {}", death);
+            warn!("Did not find player who died with id {}", death);
         }
         Some(())
     }
@@ -274,20 +379,20 @@ impl State {
         player.equipped = item;
     }
 
+    fn as_seconds(&self, ticks: i32) -> f32 {
+        as_seconds(ticks, self.header.tickrate())
+    }
+
     fn muna_in_hand(&self, id: i32) -> Option<(String, f32)> {
         self.players
             .get(&id)
-            .map(|p| {
-                (
-                    p.equipped.to_string(),
-                    (self.current_tick - p.muna_tick) as f32 / self.header.tickrate() as f32,
-                )
-            })
+            .map(|p| (p.equipped.to_string(), self.as_seconds(self.current_tick - p.muna_tick)))
             .filter(|(_, time)| time < &2.5)
     }
 
     pub fn print_stats(&self) {
-        println!("Score: {} - {}", self.score.0, self.score.1);
+        info!("Score: {} - {}", self.score.0, self.score.1);
+
         let mut current_team = None;
         let mut player_list = self
             .players
@@ -295,15 +400,17 @@ impl State {
             .filter(|(id, _)| self.teams.contains_key(id))
             .map(|(id, player)| (self.teams[id], player))
             .collect::<Vec<_>>();
-        player_list.sort_by_key(|(team, player)| (*team, -player.kills));
+        player_list.sort_by_key(|(team, player)| (*team, -player.kills, -player.assists, player.deaths));
         for (team, player) in player_list {
             if current_team != Some(team) {
                 current_team = Some(team);
-                println!("Team {}:", if !team { 1 } else { 2 });
+                info!("Team {}:", if !team { 1 } else { 2 });
             }
-            println!(
-                "{:16} (k/a/d {:3} {:3} {:3} ({} f))",
-                player.name, player.kills, player.assists, player.deaths, player.flash_assists
+            info!(
+                "[{:2}]{:16}(k/a/d {:3} {:3} {:3} ({} f) KAST: {:.0}%)",
+                self.find_player_by_xuid(player.info.xuid).unwrap(),
+                player.name, player.kills, player.assists, player.deaths, player.flash_assists,
+                100.0 * (player.kast as f32) / ((self.score.0 + self.score.1) as f32),
             );
         }
     }
@@ -313,7 +420,7 @@ pub fn parse_game<R: Read>(
     mut reader: R,
 ) -> Result<(Header, Vec<Player>, Vec<Player>), std::io::Error> {
     let header = Header::new(&mut reader);
-    println!("Tickrate: {} ticks/second", header.tickrate());
+    info!("Tickrate: {} ticks/second", header.tickrate());
 
     let mut state = State::new(header.clone());
 
@@ -375,7 +482,13 @@ pub fn parse_game<R: Read>(
     team_a.sort_by_key(|p| p.info.xuid);
     team_b.sort_by_key(|p| p.info.xuid);
 
-    Ok((header, team_a, team_b))
+    if state.score.0 > state.score.1 {
+        info!("Winner team: team with {}", team_a[0].name);
+        Ok((header, team_a, team_b))
+    } else {
+        info!("Winner team: team with {}", team_b[0].name);
+        Ok((header, team_b, team_a))
+    }
 }
 
 #[cfg(test)]
@@ -463,28 +576,28 @@ mod test {
         assert_eq!(stat(&state, assister), (0, 0, 0, 0));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(victim, killer, None, false);
+        state.update_stats(victim, killer, None, false, "knife");
 
         assert_eq!(stat(&state, killer.unwrap()), (1, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 1, 0));
         assert_eq!(stat(&state, assister), (0, 0, 0, 0));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(victim, killer, Some(assister), false);
+        state.update_stats(victim, killer, Some(assister), false, "knife");
 
         assert_eq!(stat(&state, killer.unwrap()), (2, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 2, 0));
         assert_eq!(stat(&state, assister), (0, 1, 0, 0));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(victim, killer, Some(assister), true);
+        state.update_stats(victim, killer, Some(assister), true, "knife");
 
         assert_eq!(stat(&state, killer.unwrap()), (3, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 3, 0));
         assert_eq!(stat(&state, assister), (0, 1, 0, 1));
         assert_eq!(stat(&state, friendly_assister), (0, 0, 0, 0));
 
-        state.update_stats(victim, killer, Some(friendly_assister), false);
+        state.update_stats(victim, killer, Some(friendly_assister), false, "knife");
 
         assert_eq!(stat(&state, killer.unwrap()), (4, 0, 0, 0));
         assert_eq!(stat(&state, victim), (0, 0, 4, 0));
